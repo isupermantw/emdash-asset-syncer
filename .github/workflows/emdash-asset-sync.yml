@@ -4,16 +4,6 @@ EmDash 官方正版生態三合一雲端無伺服器編譯與 R2 自動直傳工
 
 檔案位置: .github/workflows/emdash-asset-sync.yml
 
-功能亮點:
-
-1. 官方正版 Admin SPA: 自動編譯 Vite SPA 並直傳 system/admin-{version}/
-
-2. 官方三大主題庫: 自動拉取 emdash-cms/templates 並直傳 system/themes/
-
-3. 官方 WP 搬家外掛: 自動打包 emdash-cms/wp-emdash 為標準 ZIP 直傳 system/tools/wp-emdash.zip
-
-4. 支援三合一全部同步 (all) 或獨立單項同步 (spa / themes / plugin)
-
 ==============================================================================
 
 name: EmDash All-in-One Asset Syncer to Cloudflare R2
@@ -30,15 +20,15 @@ description: '目標 Cloudflare R2 儲存庫名稱'
 required: true
 default: 'fastblog-media'
 sync_mode:
-description: '同步模式選擇'
+description: '同步模式選擇 (all / spa / themes / plugin)'
 required: true
 default: 'all'
 type: choice
 options:
-- 'all (全部三項同步: SPA + 主題 + WP外掛)'
-- 'spa (僅編譯並同步正版 Admin SPA)'
-- 'themes (僅同步三大官方佈景主題庫)'
-- 'plugin (僅打包並同步 wp-emdash 搬家外掛)'
+- 'all'
+- 'spa'
+- 'themes'
+- 'plugin'
 
 jobs:
 build-and-sync:
@@ -47,60 +37,65 @@ runs-on: ubuntu-latest
 
 steps:
   # ========================================================================
-  # 0. 環境變數與模式判斷初始化
+  # 0. 環境變數與模式判斷初始化 (使用相容性最佳的 case 結構)
   # ========================================================================
   - name: Initialize Workflow & Parse Sync Flags
     run: |
       MODE="${{ github.event.inputs.sync_mode }}"
       echo "Selected Sync Mode: $MODE"
 
-      if [[ "$MODE" == *"all"* ]] \vert{}\vert{} [[ "$MODE" == "all" ]]; then
-        echo "DO_SPA=true" >> $GITHUB_ENV
-        echo "DO_THEMES=true" >> $GITHUB_ENV
-        echo "DO_PLUGIN=true" >> $GITHUB_ENV
-      elif [[ "$MODE" == *"spa"* ]]; then
-        echo "DO_SPA=true" >> $GITHUB_ENV
-        echo "DO_THEMES=false" >> $GITHUB_ENV
-        echo "DO_PLUGIN=false" >> $GITHUB_ENV
-      elif [[ "$MODE" == *"themes"* ]]; then
-        echo "DO_SPA=false" >> $GITHUB_ENV
-        echo "DO_THEMES=true" >> $GITHUB_ENV
-        echo "DO_PLUGIN=false" >> $GITHUB_ENV
-      elif [[ "$MODE" == *"plugin"* ]]; then
-        echo "DO_SPA=false" >> $GITHUB_ENV
-        echo "DO_THEMES=false" >> $GITHUB_ENV
-        echo "DO_PLUGIN=true" >> $GITHUB_ENV
-      fi
+      case "$MODE" in
+        spa)
+          echo "DO_SPA=true" >> $GITHUB_ENV
+          echo "DO_THEMES=false" >> $GITHUB_ENV
+          echo "DO_PLUGIN=false" >> $GITHUB_ENV
+          ;;
+        themes)
+          echo "DO_SPA=false" >> $GITHUB_ENV
+          echo "DO_THEMES=true" >> $GITHUB_ENV
+          echo "DO_PLUGIN=false" >> $GITHUB_ENV
+          ;;
+        plugin)
+          echo "DO_SPA=false" >> $GITHUB_ENV
+          echo "DO_THEMES=false" >> $GITHUB_ENV
+          echo "DO_PLUGIN=true" >> $GITHUB_ENV
+          ;;
+        *)
+          echo "DO_SPA=true" >> $GITHUB_ENV
+          echo "DO_THEMES=true" >> $GITHUB_ENV
+          echo "DO_PLUGIN=true" >> $GITHUB_ENV
+          ;;
+      esac
 
   # ========================================================================
   # 模組一：官方正版 Admin SPA 編譯與直傳 (emdash-cms/emdash)
   # ========================================================================
-  - name: [SPA] Clone EmDash Core Repository
+  - name: "[SPA] Clone EmDash Core Repository"
     if: env.DO_SPA == 'true'
     run: |
       echo "Cloning official EmDash core tag: ${{ github.event.inputs.version }}"
       git clone --depth 1 --branch ${{ github.event.inputs.version }} https://github.com/emdash-cms/emdash.git official-emdash
 
-  - name: [SPA] Setup Node.js 22 LTS
+  - name: "[SPA] Setup Node.js 22 LTS"
     if: env.DO_SPA == 'true'
     uses: actions/setup-node@v4
     with:
       node-version: 22
 
-  - name: [SPA] Setup pnpm 9
+  - name: "[SPA] Setup pnpm 9"
     if: env.DO_SPA == 'true'
     uses: pnpm/action-setup@v3
     with:
       version: 9
       run_install: false
 
-  - name: [SPA] Install Core Dependencies
+  - name: "[SPA] Install Core Dependencies"
     if: env.DO_SPA == 'true'
     working-directory: official-emdash
     run: |
       pnpm install --no-frozen-lockfile
 
-  - name: [SPA] Build Official Admin SPA Packages
+  - name: "[SPA] Build Official Admin SPA Packages"
     if: env.DO_SPA == 'true'
     working-directory: official-emdash
     run: |
@@ -121,7 +116,7 @@ steps:
       echo "Extracted SPA files:"
       ls -la ../extracted_dist/
 
-  - name: [SPA] Sync Official Admin SPA to Cloudflare R2
+  - name: "[SPA] Sync Official Admin SPA to Cloudflare R2"
     if: env.DO_SPA == 'true'
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -154,7 +149,7 @@ steps:
   # ========================================================================
   # 模組二：官方三大佈景主題庫同步 (emdash-cms/templates)
   # ========================================================================
-  - name: [Themes] Clone & Sync Official Templates
+  - name: "[Themes] Clone & Sync Official Templates"
     if: env.DO_THEMES == 'true'
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -181,7 +176,7 @@ steps:
   # ========================================================================
   # 模組三：官方 WP 搬家外掛打包與直傳 (emdash-cms/wp-emdash)
   # ========================================================================
-  - name: [Plugin] Package & Upload wp-emdash Plugin
+  - name: "[Plugin] Package & Upload wp-emdash Plugin"
     if: env.DO_PLUGIN == 'true'
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -226,13 +221,13 @@ steps:
       echo "=========================================================="
       echo "🎉 Cloudflare R2 官方全套生態資產同步完成！"
       echo "📦 儲存庫: ${BUCKET}"
-      if [ "${{ env.DO_SPA }}" == "true" ]; then
+      if [ "${{ env.DO_SPA }}" = "true" ]; then
         echo "  ├─ 1. 正版 Admin SPA: system/admin-${VERSION}/"
       fi
-      if [ "${{ env.DO_THEMES }}" == "true" ]; then
+      if [ "${{ env.DO_THEMES }}" = "true" ]; then
         echo "  ├─ 2. 官方三大主題: system/themes/"
       fi
-      if [ "${{ env.DO_PLUGIN }}" == "true" ]; then
+      if [ "${{ env.DO_PLUGIN }}" = "true" ]; then
         echo "  └─ 3. WP 搬家外掛: system/tools/wp-emdash.zip"
       fi
       echo "⚡ Fast AI Blog (fastblog.cc) 邊緣節點現已全數接軌官方正版生態！"
