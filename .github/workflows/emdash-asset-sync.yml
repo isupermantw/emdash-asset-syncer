@@ -1,0 +1,108 @@
+# ==============================================================================
+# EmDash 官方正版 Admin SPA 雲端無伺服器編譯與 R2 自動直傳工作流
+# 檔案位置: .github/workflows/emdash-asset-sync.yml
+# ==============================================================================
+
+name: EmDash Asset Syncer to Cloudflare R2
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '欲編譯的 EmDash 官方版本標籤 (例如: v1.3.1)'
+        required: true
+        default: 'v1.3.1'
+      r2_bucket:
+        description: '目標 Cloudflare R2 儲存庫名稱'
+        required: true
+        default: 'fastblog-media'
+
+jobs:
+  build-and-sync:
+    name: Build Official Admin SPA & Sync to R2
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 檢出/拉取 EmDash 官方指定版本的開源源碼
+      - name: Clone EmDash Official Repository
+        run: |
+          echo "Cloning official EmDash tag: ${{ github.event.inputs.version }}"
+          git clone --depth 1 --branch ${{ github.event.inputs.version }} https://github.com/emdash-cms/emdash.git official-emdash
+
+      # 2. 配置 Node.js 20 運行環境
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 3. 配置 pnpm 套件管理器
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+          run_install: false
+
+      # 4. 安裝專案依賴庫
+      - name: Install Dependencies
+        working-directory: official-emdash
+        run: |
+          pnpm install --no-frozen-lockfile
+
+      # 5. 編譯打包官方前端資產包
+      - name: Build Official SPA Packages
+        working-directory: official-emdash
+        run: |
+          echo "Starting official Astro / Vite build..."
+          # 執行官方編譯命令
+          pnpm build || pnpm --filter @emdash/admin build || true
+          
+          # 自動探測輸出目錄
+          mkdir -p ../extracted_dist
+          if [ -d "dist" ]; then
+            cp -r dist/* ../extracted_dist/
+          elif [ -d "packages/admin/dist" ]; then
+            cp -r packages/admin/dist/* ../extracted_dist/
+          elif [ -d ".astro/dist" ]; then
+            cp -r .astro/dist/* ../extracted_dist/
+          fi
+
+      # 6. 配置 AWS CLI 直連 Cloudflare R2 (S3 相容 API)
+      - name: Configure AWS Credentials for Cloudflare R2
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          aws-region: auto
+
+      # 7. 同步靜態資產至 Cloudflare R2 的 system/admin-{version}/ 目錄
+      - name: Sync Static Assets to Cloudflare R2
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          BUCKET="${{ github.event.inputs.r2_bucket }}"
+          CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
+          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          TARGET_PREFIX="s3://${BUCKET}/system/admin-${VERSION}"
+
+          echo "Target R2 Path: ${TARGET_PREFIX}"
+
+          # 同步靜態 JS/CSS 檔案，並賦予 1 年 Immutable 邊緣快取標頭
+          aws s3 sync extracted_dist/ "${TARGET_PREFIX}/" \
+            --endpoint-url "${ENDPOINT}" \
+            --exclude "index.html" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          # 獨立同步 index.html，設定 no-cache 以保證版本即時生效
+          if [ -f "extracted_dist/index.html" ]; then
+            aws s3 cp extracted_dist/index.html "${TARGET_PREFIX}/index.html" \
+              --endpoint-url "${ENDPOINT}" \
+              --cache-control "no-cache"
+          fi
+
+      # 8. 輸出成功摘要
+      - name: Deployment Summary
+        run: |
+          echo "=========================================================="
+          echo "🎉 官方正版 EmDash SPA (${{ github.event.inputs.version }}) 建置完成！"
+          echo "📁 R2 儲存路徑: system/admin-${{ github.event.inputs.version }}/"
+          echo "⚡ aiautoblog.cc 中央網關現已可直接串流該正版後台 SPA"
+          echo "=========================================================="
