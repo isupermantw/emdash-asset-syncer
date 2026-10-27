@@ -1,9 +1,9 @@
 name: EmDash All-in-One Asset Syncer to Cloudflare R2
 
 on:
-workflow_dispatch:
-inputs:
-version:
+  workflow_dispatch:
+    inputs:
+      version:
 description: '欲編譯的 EmDash 官方 SPA 版本標籤 (例如: v1.3.1)'
 required: true
 default: 'v1.3.1'
