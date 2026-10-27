@@ -123,11 +123,19 @@ jobs:
           fi
 
           echo "Uploading SPA assets to: ${TARGET_PREFIX}/"
+          set +e
           aws s3 cp extracted_dist/ "${TARGET_PREFIX}/" \
             --recursive \
             --endpoint-url "${ENDPOINT}" \
             --exclude "index.html" \
             --cache-control "public, max-age=31536000, immutable"
+          RC=$?
+          set -e
+
+          if [ $RC -ne 0 ] && [ $RC -ne 2 ]; then
+            echo "❌ SPA 靜態檔案上傳失敗 (Exit Code: $RC)"
+            exit $RC
+          fi
 
           if [ -f "extracted_dist/index.html" ]; then
             aws s3 cp extracted_dist/index.html "${TARGET_PREFIX}/index.html" \
@@ -146,23 +154,36 @@ jobs:
           rm -rf official-templates
           git clone --depth 1 https://github.com/emdash-cms/templates.git official-templates
 
-          echo "Cleaning git metadata and repository internal files..."
-          rm -rf official-templates/.git official-templates/.github official-templates/.gitignore
+          echo "Deep cleaning git metadata, hidden items, and symlinks across all subdirectories..."
+          cd official-templates
+          find . -type d -name ".git*" -prune -exec rm -rf {} + 2>/dev/null || true
+          find . -type f -name ".git*" -delete 2>/dev/null || true
+          find . -type d -name ".github" -prune -exec rm -rf {} + 2>/dev/null || true
+          find . -type l -delete 2>/dev/null || true
 
           BUCKET="${{ inputs.r2_bucket }}"
           CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
           ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          TARGET_THEMES="s3://${BUCKET}/system/themes"
+          TARGET_THEMES="s3://${BUCKET}/system/themes/"
 
-          echo "Uploading clean official templates to: ${TARGET_THEMES}/"
-          cd official-templates
+          echo "Uploading clean official templates to: ${TARGET_THEMES}"
+          set +e
           aws s3 cp . "${TARGET_THEMES}" \
             --recursive \
             --endpoint-url "${ENDPOINT}" \
             --cache-control "public, max-age=86400"
-          cd ..
+          RC=$?
+          set -e
 
-          echo "✅ 官方三大主題庫同步完成！"
+          if [ $RC -ne 0 ] && [ $RC -ne 2 ]; then
+            echo "❌ 模板檔案傳輸發生嚴重錯誤 (Exit Code: $RC)"
+            exit $RC
+          elif [ $RC -eq 2 ]; then
+            echo "⚠️ 傳輸完成，伴隨非致命略過警告 (Exit Code 2)，主題檔案已全數上傳至 R2！"
+          else
+            echo "✅ 官方三大主題庫 100% 傳輸成功 (Exit Code 0)！"
+          fi
+          cd ..
 
       - name: "[Plugin] Package & Upload wp-emdash Plugin"
         if: env.DO_PLUGIN == 'true'
