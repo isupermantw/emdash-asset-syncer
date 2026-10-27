@@ -61,6 +61,7 @@ jobs:
         if: env.DO_SPA == 'true'
         run: |
           echo "Cloning official EmDash tag: ${{ inputs.version }}"
+          rm -rf official-emdash
           git clone --depth 1 --branch ${{ inputs.version }} https://github.com/emdash-cms/emdash.git official-emdash
 
       - name: "[SPA] Setup Node.js 22 LTS"
@@ -103,7 +104,7 @@ jobs:
           echo "Extracted SPA files:"
           ls -la ../extracted_dist/
 
-      - name: "[SPA] Sync Official Admin SPA to Cloudflare R2"
+      - name: "[SPA] Upload Official Admin SPA to Cloudflare R2"
         if: env.DO_SPA == 'true'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -121,8 +122,9 @@ jobs:
             exit 1
           fi
 
-          echo "Syncing SPA assets to: ${TARGET_PREFIX}/"
-          aws s3 sync extracted_dist/ "${TARGET_PREFIX}/" \
+          echo "Uploading SPA assets to: ${TARGET_PREFIX}/"
+          aws s3 cp extracted_dist/ "${TARGET_PREFIX}/" \
+            --recursive \
             --endpoint-url "${ENDPOINT}" \
             --exclude "index.html" \
             --cache-control "public, max-age=31536000, immutable"
@@ -133,7 +135,7 @@ jobs:
               --cache-control "no-cache"
           fi
 
-      - name: "[Themes] Clone & Sync Official Templates"
+      - name: "[Themes] Clone & Upload Official Templates"
         if: env.DO_THEMES == 'true'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -141,19 +143,24 @@ jobs:
           AWS_DEFAULT_REGION: auto
         run: |
           echo "Cloning official templates (blog, portfolio, marketing)..."
+          rm -rf official-templates
           git clone --depth 1 https://github.com/emdash-cms/templates.git official-templates
+
+          echo "Cleaning git metadata and repository internal files..."
+          rm -rf official-templates/.git official-templates/.github official-templates/.gitignore
 
           BUCKET="${{ inputs.r2_bucket }}"
           CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
           ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
           TARGET_THEMES="s3://${BUCKET}/system/themes"
 
-          echo "Syncing official templates to: ${TARGET_THEMES}/"
-          aws s3 sync official-templates/ "${TARGET_THEMES}/" \
+          echo "Uploading clean official templates to: ${TARGET_THEMES}/"
+          cd official-templates
+          aws s3 cp . "${TARGET_THEMES}" \
+            --recursive \
             --endpoint-url "${ENDPOINT}" \
-            --exclude ".git*" \
-            --exclude ".github/*" \
             --cache-control "public, max-age=86400"
+          cd ..
 
           echo "✅ 官方三大主題庫同步完成！"
 
@@ -165,6 +172,7 @@ jobs:
           AWS_DEFAULT_REGION: auto
         run: |
           echo "Cloning official wp-emdash repository..."
+          rm -rf wp-emdash-src packaging wp-emdash.zip
           git clone --depth 1 https://github.com/emdash-cms/wp-emdash.git wp-emdash-src
 
           echo "Packaging into standard WordPress plugin ZIP structure..."
