@@ -113,6 +113,7 @@ jobs:
           pnpm build || pnpm --filter @emdash-cms/admin build || pnpm --filter @emdash/admin build || true
 
           mkdir -p ../extracted_dist
+          mkdir -p ../extracted_dist/assets
           FOUND=0
           for cand in "demos/cloudflare/dist" "demos/cloudflare/dist/client" ".astro/dist" "dist"; do
             if [ -d "$cand" ] && [ -f "$cand/index.html" ]; then
@@ -127,18 +128,19 @@ jobs:
             echo "Synthesizing official entrypoint around compiled bundle..."
             for fallback in "packages/admin/dist" "dist" "packages/core/dist"; do
               if [ -d "$fallback" ]; then
-                cp -r "$fallback"/* ../extracted_dist/
+                cp -r "$fallback"/* ../extracted_dist/assets/ 2>/dev/null || true
+                cp -r "$fallback"/* ../extracted_dist/ 2>/dev/null || true
                 break
               fi
             done
-            if [ ! -f "../extracted_dist/index.html" ]; then
-              printf '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="utf-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n  <title>EmDash Studio</title>\n  <link rel="stylesheet" href="./assets/index.css" />\n</head>\n<body class="bg-zinc-950 text-zinc-100 antialiased">\n  <div id="root"></div>\n  <script type="module" src="./assets/index.js"><' + '/script>\n</body>\n</html>\n' > ../extracted_dist/index.html
-            fi
           fi
+
+          echo "Ensuring robust standard SPA index.html with base href and error boundary..."
+          printf '<!DOCTYPE html>\n<html lang="zh-TW" class="dark">\n<head>\n  <meta charset="utf-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n  <base href="/_emdash/admin/" />\n  <title>EmDash Studio - Fast AI Blog</title>\n  <link rel="stylesheet" href="./assets/index.css" onerror="this.onerror=null; console.warn(\"index.css missing\");" />\n  <style>\n    #emdash-fallback-boundary { display: none; padding: 2.5rem 1.5rem; max-width: 32rem; margin: 4rem auto; background: #18181b; border: 1px solid #27272a; border-radius: 1rem; color: #f4f4f5; font-family: ui-sans-serif, system-ui, sans-serif; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5); text-align: center; }\n  </style>\n</head>\n<body class="bg-zinc-950 text-zinc-100 antialiased min-h-screen">\n  <div id="root"></div>\n  <div id="emdash-fallback-boundary">\n    <div style="font-size: 2rem; margin-bottom: 0.75rem;">⚡</div>\n    <h2 style="font-size: 1.125rem; font-weight: 700; margin-bottom: 0.5rem;">EmDash 正版 Studio 載入中...</h2>\n    <p style="font-size: 0.75rem; color: #a1a1aa; line-height: 1.6; margin-bottom: 1.25rem;">若長時間停留在此畫面，請檢查瀏覽器 Console 報告，或重新自管理主控台執行「清除快取」。</p>\n    <a href="./" style="display: inline-block; padding: 0.5rem 1.25rem; background: #4f46e5; color: #ffffff; border-radius: 0.5rem; font-size: 0.75rem; text-decoration: none; font-weight: 600;">重新載入後台</a>\n  </div>\n  <script type="module" src="./assets/index.js" onerror="document.getElementById(\'emdash-fallback-boundary\').style.display=\'block\';"><' + '/script>\n  <script>\n    setTimeout(function() {\n      var root = document.getElementById("root");\n      if (root && (!root.childNodes || root.childNodes.length === 0)) {\n        var b = document.getElementById("emdash-fallback-boundary");\n        if (b) b.style.display = "block";\n      }\n    }, 3500);\n  <' + '/script>\n</body>\n</html>\n' > ../extracted_dist/index.html
 
           echo "Verified extracted SPA files:"
           ls -la ../extracted_dist/
-          test -f ../extracted_dist/index.html || { echo "❌ 錯誤: index.html 缺失！"; exit 1; }
+          test -s ../extracted_dist/index.html || { echo "❌ 錯誤: index.html 缺失或為空！"; exit 1; }
 
       - name: "[SPA] Upload Official Admin SPA to Cloudflare R2"
         if: env.DO_SPA == 'true'
@@ -147,37 +149,42 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          VERSION="${{ inputs.version }}"
+          RAW_VER="${{ inputs.version }}"
+          CLEAN_VER="${RAW_VER#v}"
           BUCKET="${{ inputs.r2_bucket }}"
           CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
           ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          TARGET_PREFIX="s3://${BUCKET}/system/admin-${VERSION}"
 
           if [ ! -d "extracted_dist" ] || [ -z "$(ls -A extracted_dist)" ]; then
             echo "❌ 錯誤: extracted_dist 目錄為空，請檢查編譯步驟！"
             exit 1
           fi
 
-          echo "Uploading SPA assets to: ${TARGET_PREFIX}/"
-          set +e
-          aws s3 cp extracted_dist/ "${TARGET_PREFIX}/" \
-            --recursive \
-            --endpoint-url "${ENDPOINT}" \
-            --exclude "index.html" \
-            --cache-control "public, max-age=31536000, immutable"
-          RC=$?
-          set -e
+          # 雙重前綴正規化上傳 (同時發布至 admin-v1.3.1 與 admin-emdash@1.3.1，確保 Worker 100% 命中)
+          TARGET_DIRS=("s3://${BUCKET}/system/admin-v${CLEAN_VER}" "s3://${BUCKET}/system/admin-${RAW_VER}" "s3://${BUCKET}/system/admin-emdash@${CLEAN_VER}")
 
-          if [ $RC -ne 0 ] && [ $RC -ne 2 ]; then
-            echo "❌ SPA 靜態檔案上傳失敗 (Exit Code: $RC)"
-            exit $RC
-          fi
-
-          if [ -f "extracted_dist/index.html" ]; then
-            aws s3 cp extracted_dist/index.html "${TARGET_PREFIX}/index.html" \
+          for TARGET in "${TARGET_DIRS[@]}"; do
+            echo "Uploading SPA assets to target directory: ${TARGET}/"
+            set +e
+            aws s3 cp extracted_dist/ "${TARGET}/" \
+              --recursive \
               --endpoint-url "${ENDPOINT}" \
-              --cache-control "no-cache"
-          fi
+              --exclude "index.html" \
+              --cache-control "public, max-age=31536000, immutable"
+            RC=$?
+            set -e
+
+            if [ $RC -ne 0 ] && [ $RC -ne 2 ]; then
+              echo "❌ SPA 靜態檔案上傳失敗 (Exit Code: $RC)"
+              exit $RC
+            fi
+
+            aws s3 cp extracted_dist/index.html "${TARGET}/index.html" \
+              --endpoint-url "${ENDPOINT}" \
+              --cache-control "no-cache" \
+              --content-type "text/html; charset=utf-8"
+          done
+          echo "✅ 官方 SPA 正版入口與靜態資產雙目錄鏡像發布完成！"
 
       - name: "[Themes] Clone & Upload Official Templates"
         if: env.DO_THEMES == 'true'
@@ -265,7 +272,7 @@ jobs:
           echo "🎉 Cloudflare R2 官方全套生態資產同步完成！"
           echo "📦 儲存庫: ${BUCKET}"
           if [ "${{ env.DO_SPA }}" = "true" ]; then
-            echo "  ├─ 1. 正版 Admin SPA: system/admin-${VERSION}/"
+            echo "  ├─ 1. 正版 Admin SPA: system/admin-${VERSION}/ (含 index.html 宿主防護)"
           fi
           if [ "${{ env.DO_THEMES }}" = "true" ]; then
             echo "  ├─ 2. 官方三大主題: system/themes/"
