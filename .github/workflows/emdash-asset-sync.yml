@@ -91,19 +91,16 @@ jobs:
           pnpm build || pnpm --filter @emdash/admin build || true
 
           mkdir -p ../extracted_dist
-
-          # 尋找並萃取包含 index.html 的真實 SPA 發布目錄
           FOUND=0
-          for candidate in "demos/cloudflare/dist/client" "demos/cloudflare/dist" "packages/admin/dist" "dist" ".astro/dist" "packages/core/dist"; do
-            if [ -d "$candidate" ] && [ -f "$candidate/index.html" ]; then
-              echo "Found complete SPA bundle in: $candidate"
-              cp -r "$candidate"/* ../extracted_dist/
+          for cand in "demos/cloudflare/dist" "demos/cloudflare/dist/client" ".astro/dist" "dist"; do
+            if [ -d "$cand" ] && [ -f "$cand/index.html" ]; then
+              echo "Found official SPA entrypoint in: $cand"
+              cp -r "$cand"/* ../extracted_dist/
               FOUND=1
               break
             fi
           done
 
-          # 若單套件編譯產物缺少 index.html，自動對齊官方 Studio 模板入口
           if [ $FOUND -eq 0 ]; then
             echo "Synthesizing official entrypoint around compiled bundle..."
             for fallback in "packages/admin/dist" "dist" "packages/core/dist"; do
@@ -113,21 +110,19 @@ jobs:
               fi
             done
             if [ ! -f "../extracted_dist/index.html" ]; then
-              cat << 'EOF' > ../extracted_dist/index.html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>EmDash Studio</title>
-  <link rel="stylesheet" href="./assets/index.css" onerror="this.onerror=null;" />
-</head>
-<body class="bg-zinc-950 text-zinc-100 antialiased">
-  <div id="root"></div>
-  <script type="module" src="./assets/index.js"></script>
-</body>
-</html>
-EOF
+              echo '<!DOCTYPE html>' > ../extracted_dist/index.html
+              echo '<html lang="en">' >> ../extracted_dist/index.html
+              echo '<head>' >> ../extracted_dist/index.html
+              echo '  <meta charset="utf-8" />' >> ../extracted_dist/index.html
+              echo '  <meta name="viewport" content="width=device-width, initial-scale=1.0" />' >> ../extracted_dist/index.html
+              echo '  <title>EmDash Studio</title>' >> ../extracted_dist/index.html
+              echo '  <link rel="stylesheet" href="./assets/index.css" onerror="this.onerror=null;" />' >> ../extracted_dist/index.html
+              echo '</head>' >> ../extracted_dist/index.html
+              echo '<body class="bg-zinc-950 text-zinc-100 antialiased">' >> ../extracted_dist/index.html
+              echo '  <div id="root"></div>' >> ../extracted_dist/index.html
+              echo '  <script type="module" src="./assets/index.js"><' + '/script>' >> ../extracted_dist/index.html
+              echo '</body>' >> ../extracted_dist/index.html
+              echo '</html>' >> ../extracted_dist/index.html
             fi
           fi
 
@@ -173,7 +168,6 @@ EOF
               --endpoint-url "${ENDPOINT}" \
               --cache-control "no-cache"
           fi
-          echo "✅ 官方正版 Admin SPA (含 index.html) 上傳完成！"
 
       - name: "[Themes] Clone & Upload Official Templates"
         if: env.DO_THEMES == 'true'
