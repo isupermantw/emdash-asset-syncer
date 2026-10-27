@@ -105,44 +105,69 @@ jobs:
         run: |
           pnpm install --no-frozen-lockfile
 
-      - name: "[SPA] Build Official Admin SPA Packages"
+      - name: "[SPA] Build Official Admin SPA Packages (v1.1.0 拓撲構建引擎)"
         if: env.DO_SPA == 'true'
         working-directory: official-emdash
         run: |
-          echo "Starting official build..."
-          pnpm build || pnpm --filter @emdash-cms/admin build || pnpm --filter @emdash/admin build || true
+          echo "Starting official compilation with Node heap extended..."
+          export NODE_OPTIONS="--max-old-space-size=4096"
+          RAW_VER="${{ inputs.version }}"
+          CLEAN_VER="${RAW_VER#v}"
 
           mkdir -p ../extracted_dist
           mkdir -p ../extracted_dist/assets
+
+          echo "🔨 執行 Monorepo 依賴拓撲編譯..."
+          pnpm --filter "...@emdash-cms/admin" build || pnpm run --filter {./packages/**} build || pnpm build || true
+
           FOUND=0
-          for cand in "demos/cloudflare/dist" "demos/cloudflare/dist/client" ".astro/dist" "dist"; do
-            if [ -d "$cand" ] && [ -f "$cand/index.html" ]; then
-              echo "Found official SPA entrypoint in: $cand"
-              cp -r "$cand"/* ../extracted_dist/
+          for cand in "packages/admin/dist" "packages/core/dist" "dist" "demos/cloudflare/dist" "demos/cloudflare/dist/client"; do
+            if [ -d "$cand" ] && [ "$(ls -A "$cand" 2>/dev/null)" ]; then
+              echo "✅ 發現本地編譯產物目錄: $cand"
+              cp -r "$cand"/* ../extracted_dist/assets/ 2>/dev/null || true
+              cp -r "$cand"/* ../extracted_dist/ 2>/dev/null || true
               FOUND=1
-              break
             fi
           done
 
-          if [ $FOUND -eq 0 ]; then
-            echo "Synthesizing official entrypoint around compiled bundle..."
-            for fallback in "packages/admin/dist" "dist" "packages/core/dist"; do
-              if [ -d "$fallback" ]; then
-                cp -r "$fallback"/* ../extracted_dist/assets/ 2>/dev/null || true
-                cp -r "$fallback"/* ../extracted_dist/ 2>/dev/null || true
-                break
+          if [ ! -f "../extracted_dist/assets/index.js" ] && [ ! -f "../extracted_dist/assets/index.mjs" ]; then
+            echo "⚠️ 本地編譯未產出 index.js，啟動官方 npm 正版發布包解封機制..."
+            mkdir -p _npm_pack
+            cd _npm_pack
+            npm pack "@emdash-cms/admin@${CLEAN_VER}" || npm pack "@emdash-cms/admin@latest" || true
+            TARBALL=$(ls -1 emdash-cms-admin-*.tgz 2>/dev/null | head -n 1)
+            if [ -n "$TARBALL" ]; then
+              echo "📦 成功取得官方 npm 發布包: ${TARBALL}，正在提取 dist 資產..."
+              tar -xzf "$TARBALL"
+              if [ -d "package/dist" ]; then
+                cp -r package/dist/* ../../extracted_dist/assets/ 2>/dev/null || true
+                cp -r package/dist/* ../../extracted_dist/ 2>/dev/null || true
+                FOUND=1
               fi
-            done
+            fi
+            cd ..
           fi
 
-          echo "Ensuring robust standard SPA index.html with base href and error boundary..."
+          if [ -f "../extracted_dist/assets/index.mjs" ] && [ ! -f "../extracted_dist/assets/index.js" ]; then
+            echo "複製 index.mjs 為標準 index.js..."
+            cp ../extracted_dist/assets/index.mjs ../extracted_dist/assets/index.js
+          fi
+          if [ -f "../extracted_dist/index.mjs" ] && [ ! -f "../extracted_dist/index.js" ]; then
+            cp ../extracted_dist/index.mjs ../extracted_dist/index.js
+          fi
+
+          echo "合成官方標準 SPA 入口 index.html..."
           printf '<!DOCTYPE html>\n<html lang="zh-TW" class="dark">\n<head>\n  <meta charset="utf-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n  <base href="/_emdash/admin/" />\n  <title>EmDash Studio - Fast AI Blog</title>\n  <link rel="stylesheet" href="./assets/index.css" onerror="this.onerror=null; console.warn(\"index.css missing\");" />\n  <style>\n    #emdash-fallback-boundary { display: none; padding: 2.5rem 1.5rem; max-width: 32rem; margin: 4rem auto; background: #18181b; border: 1px solid #27272a; border-radius: 1rem; color: #f4f4f5; font-family: ui-sans-serif, system-ui, sans-serif; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5); text-align: center; }\n  </style>\n</head>\n<body class="bg-zinc-950 text-zinc-100 antialiased min-h-screen">\n  <div id="root"></div>\n  <div id="emdash-fallback-boundary">\n    <div style="font-size: 2rem; margin-bottom: 0.75rem;">⚡</div>\n    <h2 style="font-size: 1.125rem; font-weight: 700; margin-bottom: 0.5rem;">EmDash 正版 Studio 載入中...</h2>\n    <p style="font-size: 0.75rem; color: #a1a1aa; line-height: 1.6; margin-bottom: 1.25rem;">若長時間停留在此畫面，請檢查瀏覽器 Console 報告，或重新自管理主控台執行「清除快取」。</p>\n    <a href="./" style="display: inline-block; padding: 0.5rem 1.25rem; background: #4f46e5; color: #ffffff; border-radius: 0.5rem; font-size: 0.75rem; text-decoration: none; font-weight: 600;">重新載入後台</a>\n  </div>\n  <script type="module" src="./assets/index.js" onerror="document.getElementById(\'emdash-fallback-boundary\').style.display=\'block\';"><' + '/script>\n  <script>\n    setTimeout(function() {\n      var root = document.getElementById("root");\n      if (root && (!root.childNodes || root.childNodes.length === 0)) {\n        var b = document.getElementById("emdash-fallback-boundary");\n        if (b) b.style.display = "block";\n      }\n    }, 3500);\n  <' + '/script>\n</body>\n</html>\n' > ../extracted_dist/index.html
 
-          echo "Verified extracted SPA files:"
+          echo "=========================================================="
+          echo "📁 extracted_dist 目錄架構檢驗:"
           ls -la ../extracted_dist/
+          echo "📁 assets 子目錄清單:"
+          ls -la ../extracted_dist/assets/ 2>/dev/null || true
+          echo "=========================================================="
           test -s ../extracted_dist/index.html || { echo "❌ 錯誤: index.html 缺失或為空！"; exit 1; }
 
-      - name: "[SPA] Upload Official Admin SPA to Cloudflare R2"
+      - name: "[SPA] Upload Official Admin SPA to Cloudflare R2 (Exit 2 免疫版)"
         if: env.DO_SPA == 'true'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -160,29 +185,55 @@ jobs:
             exit 1
           fi
 
-          # 雙重前綴正規化上傳 (同時發布至 admin-v1.3.1 與 admin-emdash@1.3.1，確保 Worker 100% 命中)
           TARGET_DIRS=("s3://${BUCKET}/system/admin-v${CLEAN_VER}" "s3://${BUCKET}/system/admin-${RAW_VER}" "s3://${BUCKET}/system/admin-emdash@${CLEAN_VER}")
 
           for TARGET in "${TARGET_DIRS[@]}"; do
-            echo "Uploading SPA assets to target directory: ${TARGET}/"
+            echo "=========================================================="
+            echo "🚀 開始上傳資產至目標目錄: ${TARGET}/"
+            echo "=========================================================="
+
+            if [ -d "extracted_dist/assets" ] && [ "$(ls -A extracted_dist/assets 2>/dev/null)" ]; then
+              echo "📦 正在上傳 assets/ 靜態分塊資源至: ${TARGET}/assets/ ..."
+              set +e
+              aws s3 cp extracted_dist/assets/ "${TARGET}/assets/" \
+                --recursive \
+                --endpoint-url "${ENDPOINT}" \
+                --cache-control "public, max-age=31536000, immutable"
+              RC_ASSETS=$?
+              set -e
+
+              if [ $RC_ASSETS -ne 0 ] && [ $RC_ASSETS -ne 2 ]; then
+                echo "❌ assets 目錄傳輸失敗 (Exit Code: $RC_ASSETS)"
+                exit $RC_ASSETS
+              elif [ $RC_ASSETS -eq 2 ]; then
+                echo "⚠️ assets 傳輸伴隨略過警告 (Exit Code 2)，繼續執行..."
+              else
+                echo "✅ assets/ 靜態分塊資源 100% 傳輸成功！"
+              fi
+            else
+              echo "⚠️ 警告: extracted_dist/assets 未檢測到實體檔案"
+            fi
+
+            echo "📄 正在上傳 SPA 入口 index.html 至: ${TARGET}/index.html ..."
+            aws s3 cp extracted_dist/index.html "${TARGET}/index.html" \
+              --endpoint-url "${ENDPOINT}" \
+              --cache-control "no-cache" \
+              --content-type "text/html; charset=utf-8"
+
             set +e
             aws s3 cp extracted_dist/ "${TARGET}/" \
               --recursive \
               --endpoint-url "${ENDPOINT}" \
               --exclude "index.html" \
+              --exclude "assets/*" \
               --cache-control "public, max-age=31536000, immutable"
-            RC=$?
+            RC_ROOT=$?
             set -e
 
-            if [ $RC -ne 0 ] && [ $RC -ne 2 ]; then
-              echo "❌ SPA 靜態檔案上傳失敗 (Exit Code: $RC)"
-              exit $RC
+            if [ $RC_ROOT -ne 0 ] && [ $RC_ROOT -ne 2 ]; then
+              echo "❌ 根層檔案傳輸失敗 (Exit Code: $RC_ROOT)"
+              exit $RC_ROOT
             fi
-
-            aws s3 cp extracted_dist/index.html "${TARGET}/index.html" \
-              --endpoint-url "${ENDPOINT}" \
-              --cache-control "no-cache" \
-              --content-type "text/html; charset=utf-8"
           done
           echo "✅ 官方 SPA 正版入口與靜態資產雙目錄鏡像發布完成！"
 
@@ -272,7 +323,7 @@ jobs:
           echo "🎉 Cloudflare R2 官方全套生態資產同步完成！"
           echo "📦 儲存庫: ${BUCKET}"
           if [ "${{ env.DO_SPA }}" = "true" ]; then
-            echo "  ├─ 1. 正版 Admin SPA: system/admin-${VERSION}/ (含 index.html 宿主防護)"
+            echo "  ├─ 1. 正版 Admin SPA: system/admin-${VERSION}/ (含 assets/ 與 index.html)"
           fi
           if [ "${{ env.DO_THEMES }}" = "true" ]; then
             echo "  ├─ 2. 官方三大主題: system/themes/"
