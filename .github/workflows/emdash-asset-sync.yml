@@ -29,11 +29,11 @@ jobs:
           echo "Cloning official EmDash tag: ${{ github.event.inputs.version }}"
           git clone --depth 1 --branch ${{ github.event.inputs.version }} https://github.com/emdash-cms/emdash.git official-emdash
 
-      # 2. 配置 Node.js 20 運行環境
-      - name: Setup Node.js 20
+      # 2. 配置 Node.js 22 (LTS) 運行環境
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       # 3. 配置 pnpm 套件管理器
       - name: Setup pnpm
@@ -52,7 +52,7 @@ jobs:
       - name: Build Official SPA Packages
         working-directory: official-emdash
         run: |
-          echo "Starting official Astro / Vite build..."
+          echo "Starting official build..."
           # 執行官方編譯命令
           pnpm build || pnpm --filter @emdash/admin build || true
           
@@ -62,20 +62,21 @@ jobs:
             cp -r dist/* ../extracted_dist/
           elif [ -d "packages/admin/dist" ]; then
             cp -r packages/admin/dist/* ../extracted_dist/
+          elif [ -d "packages/core/dist" ]; then
+            cp -r packages/core/dist/* ../extracted_dist/
           elif [ -d ".astro/dist" ]; then
             cp -r .astro/dist/* ../extracted_dist/
           fi
 
-      # 6. 配置 AWS CLI 直連 Cloudflare R2 (S3 相容 API)
-      - name: Configure AWS Credentials for Cloudflare R2
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          aws-region: auto
+          echo "Extracted files:"
+          ls -la ../extracted_dist/
 
-      # 7. 同步靜態資產至 Cloudflare R2 的 system/admin-{version}/ 目錄
+      # 6. 同步靜態資產至 Cloudflare R2 (S3 相容 API，直接注入認證變數直連，不連線 AWS STS)
       - name: Sync Static Assets to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
         run: |
           VERSION="${{ github.event.inputs.version }}"
           BUCKET="${{ github.event.inputs.r2_bucket }}"
@@ -83,7 +84,14 @@ jobs:
           ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
           TARGET_PREFIX="s3://${BUCKET}/system/admin-${VERSION}"
 
+          echo "Target R2 Endpoint: ${ENDPOINT}"
           echo "Target R2 Path: ${TARGET_PREFIX}"
+
+          # 檢查是否有編譯產出
+          if [ ! -d "extracted_dist" ] || [ -z "$(ls -A extracted_dist)" ]; then
+            echo "❌ 錯誤: extracted_dist 目錄為空或不存在，請檢查編譯步驟！"
+            exit 1
+          fi
 
           # 同步靜態 JS/CSS 檔案，並賦予 1 年 Immutable 邊緣快取標頭
           aws s3 sync extracted_dist/ "${TARGET_PREFIX}/" \
@@ -98,7 +106,7 @@ jobs:
               --cache-control "no-cache"
           fi
 
-      # 8. 輸出成功摘要
+      # 7. 輸出成功摘要
       - name: Deployment Summary
         run: |
           echo "=========================================================="
