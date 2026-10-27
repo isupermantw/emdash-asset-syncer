@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "欲編譯的 EmDash 官方 SPA 版本標籤 (例如: v1.3.1)"
+        description: "欲編譯的 EmDash 官方版本標籤 (例如: v1.3.1 或 emdash@1.3.1)"
         required: true
         default: "v1.3.1"
         type: string
@@ -60,9 +60,31 @@ jobs:
       - name: "[SPA] Clone EmDash Core Repository"
         if: env.DO_SPA == 'true'
         run: |
-          echo "Cloning official EmDash tag: ${{ inputs.version }}"
+          RAW_VER="${{ inputs.version }}"
+          CLEAN_VER="${RAW_VER#v}"
+          echo "=========================================================="
+          echo "🔍 準備克隆官方 EmDash 儲存庫，目標版本輸入: ${RAW_VER}"
+          echo "=========================================================="
           rm -rf official-emdash
-          git clone --depth 1 --branch ${{ inputs.version }} https://github.com/emdash-cms/emdash.git official-emdash
+          CLONED=0
+          for REF in "${RAW_VER}" "emdash@${CLEAN_VER}" "emdash@${RAW_VER}" "v${CLEAN_VER}" "${CLEAN_VER}" "@emdash-cms/admin@${CLEAN_VER}"; do
+            echo "👉 嘗試透過 Git Ref 克隆: [${REF}]..."
+            if git clone --depth 1 --branch "${REF}" https://github.com/emdash-cms/emdash.git official-emdash 2>/dev/null; then
+              echo "✅ 成功克隆官方 EmDash (命中 Ref: ${REF})！"
+              CLONED=1
+              break
+            fi
+          done
+          if [ $CLONED -eq 0 ]; then
+            echo "⚠️ 官方倉庫未找到指定 Ref，啟用安全回退機制：克隆官方 main 穩定分支..."
+            if git clone --depth 1 https://github.com/emdash-cms/emdash.git official-emdash; then
+              echo "✅ 已成功克隆官方最新 main 分支。"
+              CLONED=1
+            else
+              echo "❌ 嚴重錯誤：無法連線至 GitHub 官方儲存庫！"
+              exit 128
+            fi
+          fi
 
       - name: "[SPA] Setup Node.js 22 LTS"
         if: env.DO_SPA == 'true'
@@ -88,7 +110,7 @@ jobs:
         working-directory: official-emdash
         run: |
           echo "Starting official build..."
-          pnpm build || pnpm --filter @emdash/admin build || true
+          pnpm build || pnpm --filter @emdash-cms/admin build || pnpm --filter @emdash/admin build || true
 
           mkdir -p ../extracted_dist
           FOUND=0
