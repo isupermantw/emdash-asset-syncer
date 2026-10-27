@@ -4,210 +4,209 @@ on:
   workflow_dispatch:
     inputs:
       version:
-description: '欲編譯的 EmDash 官方 SPA 版本標籤 (例如: v1.3.1)'
-required: true
-default: 'v1.3.1'
-type: string
-r2_bucket:
-description: '目標 Cloudflare R2 儲存庫名稱'
-required: true
-default: 'fastblog-media'
-type: string
-sync_mode:
-description: '同步模式選擇 (all / spa / themes / plugin)'
-required: true
-default: 'all'
-type: choice
-options:
-- 'all'
-- 'spa'
-- 'themes'
-- 'plugin'
+        description: "欲編譯的 EmDash 官方 SPA 版本標籤 (例如: v1.3.1)"
+        required: true
+        default: "v1.3.1"
+        type: string
+      r2_bucket:
+        description: "目標 Cloudflare R2 儲存庫名稱"
+        required: true
+        default: "fastblog-media"
+        type: string
+      sync_mode:
+        description: "同步模式選擇 (all / spa / themes / plugin)"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - spa
+          - themes
+          - plugin
 
 jobs:
-build-and-sync:
-name: Build & Sync Official Assets to R2
-runs-on: ubuntu-latest
+  build-and-sync:
+    name: Build & Sync Official Assets to R2
+    runs-on: ubuntu-latest
+    steps:
+      - name: Initialize Workflow & Parse Sync Flags
+        run: |
+          MODE="${{ inputs.sync_mode }}"
+          if [ -z "$MODE" ]; then
+            MODE="${{ github.event.inputs.sync_mode }}"
+          fi
+          if [ -z "$MODE" ]; then
+            MODE="all"
+          fi
+          echo "Selected Sync Mode: $MODE"
+          if [ "$MODE" = "spa" ]; then
+            echo "DO_SPA=true" >> "$GITHUB_ENV"
+            echo "DO_THEMES=false" >> "$GITHUB_ENV"
+            echo "DO_PLUGIN=false" >> "$GITHUB_ENV"
+          elif [ "$MODE" = "themes" ]; then
+            echo "DO_SPA=false" >> "$GITHUB_ENV"
+            echo "DO_THEMES=true" >> "$GITHUB_ENV"
+            echo "DO_PLUGIN=false" >> "$GITHUB_ENV"
+          elif [ "$MODE" = "plugin" ]; then
+            echo "DO_SPA=false" >> "$GITHUB_ENV"
+            echo "DO_THEMES=false" >> "$GITHUB_ENV"
+            echo "DO_PLUGIN=true" >> "$GITHUB_ENV"
+          else
+            echo "DO_SPA=true" >> "$GITHUB_ENV"
+            echo "DO_THEMES=true" >> "$GITHUB_ENV"
+            echo "DO_PLUGIN=true" >> "$GITHUB_ENV"
+          fi
 
-steps:
-  - name: Initialize Workflow & Parse Sync Flags
-    run: |
-      MODE="${{ github.event.inputs.sync_mode }}"
-      echo "Selected Sync Mode: $MODE"
+      - name: "[SPA] Clone EmDash Core Repository"
+        if: env.DO_SPA == 'true'
+        run: |
+          echo "Cloning official EmDash tag: ${{ inputs.version }}"
+          git clone --depth 1 --branch ${{ inputs.version }} https://github.com/emdash-cms/emdash.git official-emdash
 
-      case "$MODE" in
-        spa)
-          echo "DO_SPA=true" >> $GITHUB_ENV
-          echo "DO_THEMES=false" >> $GITHUB_ENV
-          echo "DO_PLUGIN=false" >> $GITHUB_ENV
-          ;;
-        themes)
-          echo "DO_SPA=false" >> $GITHUB_ENV
-          echo "DO_THEMES=true" >> $GITHUB_ENV
-          echo "DO_PLUGIN=false" >> $GITHUB_ENV
-          ;;
-        plugin)
-          echo "DO_SPA=false" >> $GITHUB_ENV
-          echo "DO_THEMES=false" >> $GITHUB_ENV
-          echo "DO_PLUGIN=true" >> $GITHUB_ENV
-          ;;
-        *)
-          echo "DO_SPA=true" >> $GITHUB_ENV
-          echo "DO_THEMES=true" >> $GITHUB_ENV
-          echo "DO_PLUGIN=true" >> $GITHUB_ENV
-          ;;
-      esac
+      - name: "[SPA] Setup Node.js 22 LTS"
+        if: env.DO_SPA == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
-  - name: "[SPA] Clone EmDash Core Repository"
-    if: env.DO_SPA == 'true'
-    run: |
-      echo "Cloning official EmDash core tag: ${{ github.event.inputs.version }}"
-      git clone --depth 1 --branch ${{ github.event.inputs.version }} https://github.com/emdash-cms/emdash.git official-emdash
+      - name: "[SPA] Setup pnpm 9"
+        if: env.DO_SPA == 'true'
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+          run_install: false
 
-  - name: "[SPA] Setup Node.js 22 LTS"
-    if: env.DO_SPA == 'true'
-    uses: actions/setup-node@v4
-    with:
-      node-version: 22
+      - name: "[SPA] Install Core Dependencies"
+        if: env.DO_SPA == 'true'
+        working-directory: official-emdash
+        run: |
+          pnpm install --no-frozen-lockfile
 
-  - name: "[SPA] Setup pnpm 9"
-    if: env.DO_SPA == 'true'
-    uses: pnpm/action-setup@v3
-    with:
-      version: 9
-      run_install: false
+      - name: "[SPA] Build Official Admin SPA Packages"
+        if: env.DO_SPA == 'true'
+        working-directory: official-emdash
+        run: |
+          echo "Starting official build..."
+          pnpm build || pnpm --filter @emdash/admin build || true
 
-  - name: "[SPA] Install Core Dependencies"
-    if: env.DO_SPA == 'true'
-    working-directory: official-emdash
-    run: |
-      pnpm install --no-frozen-lockfile
+          mkdir -p ../extracted_dist
+          if [ -d "dist" ]; then
+            cp -r dist/* ../extracted_dist/
+          elif [ -d "packages/admin/dist" ]; then
+            cp -r packages/admin/dist/* ../extracted_dist/
+          elif [ -d "packages/core/dist" ]; then
+            cp -r packages/core/dist/* ../extracted_dist/
+          elif [ -d ".astro/dist" ]; then
+            cp -r .astro/dist/* ../extracted_dist/
+          fi
 
-  - name: "[SPA] Build Official Admin SPA Packages"
-    if: env.DO_SPA == 'true'
-    working-directory: official-emdash
-    run: |
-      echo "Starting official build..."
-      pnpm build || pnpm --filter @emdash/admin build || true
+          echo "Extracted SPA files:"
+          ls -la ../extracted_dist/
 
-      mkdir -p ../extracted_dist
-      if [ -d "dist" ]; then
-        cp -r dist/* ../extracted_dist/
-      elif [ -d "packages/admin/dist" ]; then
-        cp -r packages/admin/dist/* ../extracted_dist/
-      elif [ -d "packages/core/dist" ]; then
-        cp -r packages/core/dist/* ../extracted_dist/
-      elif [ -d ".astro/dist" ]; then
-        cp -r .astro/dist/* ../extracted_dist/
-      fi
+      - name: "[SPA] Sync Official Admin SPA to Cloudflare R2"
+        if: env.DO_SPA == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          VERSION="${{ inputs.version }}"
+          BUCKET="${{ inputs.r2_bucket }}"
+          CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
+          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          TARGET_PREFIX="s3://${BUCKET}/system/admin-${VERSION}"
 
-      echo "Extracted SPA files:"
-      ls -la ../extracted_dist/
+          if [ ! -d "extracted_dist" ] || [ -z "$(ls -A extracted_dist)" ]; then
+            echo "❌ 錯誤: extracted_dist 目錄為空，請檢查編譯步驟！"
+            exit 1
+          fi
 
-  - name: "[SPA] Sync Official Admin SPA to Cloudflare R2"
-    if: env.DO_SPA == 'true'
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: auto
-    run: |
-      VERSION="${{ github.event.inputs.version }}"
-      BUCKET="${{ github.event.inputs.r2_bucket }}"
-      CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
-      ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-      TARGET_PREFIX="s3://${BUCKET}/system/admin-${VERSION}"
+          echo "Syncing SPA assets to: ${TARGET_PREFIX}/"
+          aws s3 sync extracted_dist/ "${TARGET_PREFIX}/" \
+            --endpoint-url "${ENDPOINT}" \
+            --exclude "index.html" \
+            --cache-control "public, max-age=31536000, immutable"
 
-      if [ ! -d "extracted_dist" ] || [ -z "$(ls -A extracted_dist)" ]; then
-        echo "❌ 錯誤: extracted_dist 目錄為空，請檢查編譯步驟！"
-        exit 1
-      fi
+          if [ -f "extracted_dist/index.html" ]; then
+            aws s3 cp extracted_dist/index.html "${TARGET_PREFIX}/index.html" \
+              --endpoint-url "${ENDPOINT}" \
+              --cache-control "no-cache"
+          fi
 
-      echo "Syncing SPA assets to: ${TARGET_PREFIX}/"
-      aws s3 sync extracted_dist/ "${TARGET_PREFIX}/" \
-        --endpoint-url "${ENDPOINT}" \
-        --exclude "index.html" \
-        --cache-control "public, max-age=31536000, immutable"
+      - name: "[Themes] Clone & Sync Official Templates"
+        if: env.DO_THEMES == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          echo "Cloning official templates (blog, portfolio, marketing)..."
+          git clone --depth 1 https://github.com/emdash-cms/templates.git official-templates
 
-      if [ -f "extracted_dist/index.html" ]; then
-        aws s3 cp extracted_dist/index.html "${TARGET_PREFIX}/index.html" \
-          --endpoint-url "${ENDPOINT}" \
-          --cache-control "no-cache"
-      fi
+          BUCKET="${{ inputs.r2_bucket }}"
+          CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
+          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          TARGET_THEMES="s3://${BUCKET}/system/themes"
 
-  - name: "[Themes] Clone & Sync Official Templates"
-    if: env.DO_THEMES == 'true'
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: auto
-    run: |
-      echo "Cloning official templates (blog, portfolio, marketing)..."
-      git clone --depth 1 https://github.com/emdash-cms/templates.git official-templates
+          echo "Syncing official templates to: ${TARGET_THEMES}/"
+          aws s3 sync official-templates/ "${TARGET_THEMES}/" \
+            --endpoint-url "${ENDPOINT}" \
+            --exclude ".git*" \
+            --exclude ".github/*" \
+            --cache-control "public, max-age=86400"
 
-      BUCKET="${{ github.event.inputs.r2_bucket }}"
-      CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
-      ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-      TARGET_THEMES="s3://${BUCKET}/system/themes"
+          echo "✅ 官方三大主題庫同步完成！"
 
-      echo "Syncing official templates to: ${TARGET_THEMES}/"
-      aws s3 sync official-templates/ "${TARGET_THEMES}/" \
-        --endpoint-url "${ENDPOINT}" \
-        --exclude ".git*" \
-        --exclude ".github/*" \
-        --cache-control "public, max-age=86400"
+      - name: "[Plugin] Package & Upload wp-emdash Plugin"
+        if: env.DO_PLUGIN == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          echo "Cloning official wp-emdash repository..."
+          git clone --depth 1 https://github.com/emdash-cms/wp-emdash.git wp-emdash-src
 
-      echo "✅ 官方三大主題庫同步完成！"
+          echo "Packaging into standard WordPress plugin ZIP structure..."
+          mkdir -p packaging/wp-emdash
+          cp -r wp-emdash-src/* packaging/wp-emdash/
+          rm -rf packaging/wp-emdash/.git* packaging/wp-emdash/.github
 
-  - name: "[Plugin] Package & Upload wp-emdash Plugin"
-    if: env.DO_PLUGIN == 'true'
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: auto
-    run: |
-      echo "Cloning official wp-emdash repository..."
-      git clone --depth 1 https://github.com/emdash-cms/wp-emdash.git wp-emdash-src
+          cd packaging
+          zip -r ../wp-emdash.zip wp-emdash -x "*.git*"
+          cd ..
 
-      echo "Packaging into standard WordPress plugin ZIP structure..."
-      mkdir -p packaging/wp-emdash
-      cp -r wp-emdash-src/* packaging/wp-emdash/
-      rm -rf packaging/wp-emdash/.git* packaging/wp-emdash/.github
+          echo "Verifying ZIP file size:"
+          ls -lh wp-emdash.zip
 
-      cd packaging
-      zip -r ../wp-emdash.zip wp-emdash -x "*.git*"
-      cd ..
+          BUCKET="${{ inputs.r2_bucket }}"
+          CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
+          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          TARGET_PLUGIN="s3://${BUCKET}/system/tools/wp-emdash.zip"
 
-      echo "Verifying ZIP file size:"
-      ls -lh wp-emdash.zip
+          echo "Uploading wp-emdash.zip to: ${TARGET_PLUGIN}"
+          aws s3 cp wp-emdash.zip "${TARGET_PLUGIN}" \
+            --endpoint-url "${ENDPOINT}" \
+            --cache-control "public, max-age=86400" \
+            --content-type "application/zip"
 
-      BUCKET="${{ github.event.inputs.r2_bucket }}"
-      CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
-      ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-      TARGET_PLUGIN="s3://${BUCKET}/system/tools/wp-emdash.zip"
+          echo "✅ 官方 wp-emdash 搬家外掛打包並上傳完成！"
 
-      echo "Uploading wp-emdash.zip to: ${TARGET_PLUGIN}"
-      aws s3 cp wp-emdash.zip "${TARGET_PLUGIN}" \
-        --endpoint-url "${ENDPOINT}" \
-        --cache-control "public, max-age=86400" \
-        --content-type "application/zip"
-
-      echo "✅ 官方 wp-emdash 搬家外掛打包並上傳完成！"
-
-  - name: Execution Summary
-    run: |
-      BUCKET="${{ github.event.inputs.r2_bucket }}"
-      VERSION="${{ github.event.inputs.version }}"
-      echo "=========================================================="
-      echo "🎉 Cloudflare R2 官方全套生態資產同步完成！"
-      echo "📦 儲存庫: ${BUCKET}"
-      if [ "${{ env.DO_SPA }}" = "true" ]; then
-        echo "  ├─ 1. 正版 Admin SPA: system/admin-${VERSION}/"
-      fi
-      if [ "${{ env.DO_THEMES }}" = "true" ]; then
-        echo "  ├─ 2. 官方三大主題: system/themes/"
-      fi
-      if [ "${{ env.DO_PLUGIN }}" = "true" ]; then
-        echo "  └─ 3. WP 搬家外掛: system/tools/wp-emdash.zip"
-      fi
-      echo "⚡ Fast AI Blog (fastblog.cc) 邊緣節點現已全數接軌官方正版生態！"
-      echo "=========================================================="
+      - name: Execution Summary
+        run: |
+          BUCKET="${{ inputs.r2_bucket }}"
+          VERSION="${{ inputs.version }}"
+          echo "=========================================================="
+          echo "🎉 Cloudflare R2 官方全套生態資產同步完成！"
+          echo "📦 儲存庫: ${BUCKET}"
+          if [ "${{ env.DO_SPA }}" = "true" ]; then
+            echo "  ├─ 1. 正版 Admin SPA: system/admin-${VERSION}/"
+          fi
+          if [ "${{ env.DO_THEMES }}" = "true" ]; then
+            echo "  ├─ 2. 官方三大主題: system/themes/"
+          fi
+          if [ "${{ env.DO_PLUGIN }}" = "true" ]; then
+            echo "  └─ 3. WP 搬家外掛: system/tools/wp-emdash.zip"
+          fi
+          echo "⚡ Fast AI Blog (fastblog.cc) 邊緣節點現已全數接軌官方正版生態！"
+          echo "=========================================================="
