@@ -1,116 +1,239 @@
-# ==============================================================================
-# EmDash 官方正版 Admin SPA 雲端無伺服器編譯與 R2 自動直傳工作流
-# 檔案位置: .github/workflows/emdash-asset-sync.yml
-# ==============================================================================
+==============================================================================
 
-name: EmDash Asset Syncer to Cloudflare R2
+EmDash 官方正版生態三合一雲端無伺服器編譯與 R2 自動直傳工作流
+
+檔案位置: .github/workflows/emdash-asset-sync.yml
+
+功能亮點:
+
+1. 官方正版 Admin SPA: 自動編譯 Vite SPA 並直傳 system/admin-{version}/
+
+2. 官方三大主題庫: 自動拉取 emdash-cms/templates 並直傳 system/themes/
+
+3. 官方 WP 搬家外掛: 自動打包 emdash-cms/wp-emdash 為標準 ZIP 直傳 system/tools/wp-emdash.zip
+
+4. 支援三合一全部同步 (all) 或獨立單項同步 (spa / themes / plugin)
+
+==============================================================================
+
+name: EmDash All-in-One Asset Syncer to Cloudflare R2
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: '欲編譯的 EmDash 官方版本標籤 (例如: v1.3.1)'
-        required: true
-        default: 'v1.3.1'
-      r2_bucket:
-        description: '目標 Cloudflare R2 儲存庫名稱'
-        required: true
-        default: 'fastblog-media'
+workflow_dispatch:
+inputs:
+version:
+description: '欲編譯的 EmDash 官方 SPA 版本標籤 (例如: v1.3.1)'
+required: true
+default: 'v1.3.1'
+r2_bucket:
+description: '目標 Cloudflare R2 儲存庫名稱'
+required: true
+default: 'fastblog-media'
+sync_mode:
+description: '同步模式選擇'
+required: true
+default: 'all'
+type: choice
+options:
+- 'all (全部三項同步: SPA + 主題 + WP外掛)'
+- 'spa (僅編譯並同步正版 Admin SPA)'
+- 'themes (僅同步三大官方佈景主題庫)'
+- 'plugin (僅打包並同步 wp-emdash 搬家外掛)'
 
 jobs:
-  build-and-sync:
-    name: Build Official Admin SPA & Sync to R2
-    runs-on: ubuntu-latest
+build-and-sync:
+name: Build & Sync Official Assets to R2
+runs-on: ubuntu-latest
 
-    steps:
-      # 1. 檢出/拉取 EmDash 官方指定版本的開源源碼
-      - name: Clone EmDash Official Repository
-        run: |
-          echo "Cloning official EmDash tag: ${{ github.event.inputs.version }}"
-          git clone --depth 1 --branch ${{ github.event.inputs.version }} https://github.com/emdash-cms/emdash.git official-emdash
+steps:
+  # ========================================================================
+  # 0. 環境變數與模式判斷初始化
+  # ========================================================================
+  - name: Initialize Workflow & Parse Sync Flags
+    run: |
+      MODE="${{ github.event.inputs.sync_mode }}"
+      echo "Selected Sync Mode: $MODE"
 
-      # 2. 配置 Node.js 22 (LTS) 運行環境
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      if [[ "$MODE" == *"all"* ]] \vert{}\vert{} [[ "$MODE" == "all" ]]; then
+        echo "DO_SPA=true" >> $GITHUB_ENV
+        echo "DO_THEMES=true" >> $GITHUB_ENV
+        echo "DO_PLUGIN=true" >> $GITHUB_ENV
+      elif [[ "$MODE" == *"spa"* ]]; then
+        echo "DO_SPA=true" >> $GITHUB_ENV
+        echo "DO_THEMES=false" >> $GITHUB_ENV
+        echo "DO_PLUGIN=false" >> $GITHUB_ENV
+      elif [[ "$MODE" == *"themes"* ]]; then
+        echo "DO_SPA=false" >> $GITHUB_ENV
+        echo "DO_THEMES=true" >> $GITHUB_ENV
+        echo "DO_PLUGIN=false" >> $GITHUB_ENV
+      elif [[ "$MODE" == *"plugin"* ]]; then
+        echo "DO_SPA=false" >> $GITHUB_ENV
+        echo "DO_THEMES=false" >> $GITHUB_ENV
+        echo "DO_PLUGIN=true" >> $GITHUB_ENV
+      fi
 
-      # 3. 配置 pnpm 套件管理器
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: 9
-          run_install: false
+  # ========================================================================
+  # 模組一：官方正版 Admin SPA 編譯與直傳 (emdash-cms/emdash)
+  # ========================================================================
+  - name: [SPA] Clone EmDash Core Repository
+    if: env.DO_SPA == 'true'
+    run: |
+      echo "Cloning official EmDash core tag: ${{ github.event.inputs.version }}"
+      git clone --depth 1 --branch ${{ github.event.inputs.version }} https://github.com/emdash-cms/emdash.git official-emdash
 
-      # 4. 安裝專案依賴庫
-      - name: Install Dependencies
-        working-directory: official-emdash
-        run: |
-          pnpm install --no-frozen-lockfile
+  - name: [SPA] Setup Node.js 22 LTS
+    if: env.DO_SPA == 'true'
+    uses: actions/setup-node@v4
+    with:
+      node-version: 22
 
-      # 5. 編譯打包官方前端資產包
-      - name: Build Official SPA Packages
-        working-directory: official-emdash
-        run: |
-          echo "Starting official build..."
-          # 執行官方編譯命令
-          pnpm build || pnpm --filter @emdash/admin build || true
-          
-          # 自動探測輸出目錄
-          mkdir -p ../extracted_dist
-          if [ -d "dist" ]; then
-            cp -r dist/* ../extracted_dist/
-          elif [ -d "packages/admin/dist" ]; then
-            cp -r packages/admin/dist/* ../extracted_dist/
-          elif [ -d "packages/core/dist" ]; then
-            cp -r packages/core/dist/* ../extracted_dist/
-          elif [ -d ".astro/dist" ]; then
-            cp -r .astro/dist/* ../extracted_dist/
-          fi
+  - name: [SPA] Setup pnpm 9
+    if: env.DO_SPA == 'true'
+    uses: pnpm/action-setup@v3
+    with:
+      version: 9
+      run_install: false
 
-          echo "Extracted files:"
-          ls -la ../extracted_dist/
+  - name: [SPA] Install Core Dependencies
+    if: env.DO_SPA == 'true'
+    working-directory: official-emdash
+    run: |
+      pnpm install --no-frozen-lockfile
 
-      # 6. 同步靜態資產至 Cloudflare R2 (S3 相容 API，直接注入認證變數直連，不連線 AWS STS)
-      - name: Sync Static Assets to Cloudflare R2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-        run: |
-          VERSION="${{ github.event.inputs.version }}"
-          BUCKET="${{ github.event.inputs.r2_bucket }}"
-          CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
-          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          TARGET_PREFIX="s3://${BUCKET}/system/admin-${VERSION}"
+  - name: [SPA] Build Official Admin SPA Packages
+    if: env.DO_SPA == 'true'
+    working-directory: official-emdash
+    run: |
+      echo "Starting official build..."
+      pnpm build || pnpm --filter @emdash/admin build || true
 
-          echo "Target R2 Endpoint: ${ENDPOINT}"
-          echo "Target R2 Path: ${TARGET_PREFIX}"
+      mkdir -p ../extracted_dist
+      if [ -d "dist" ]; then
+        cp -r dist/* ../extracted_dist/
+      elif [ -d "packages/admin/dist" ]; then
+        cp -r packages/admin/dist/* ../extracted_dist/
+      elif [ -d "packages/core/dist" ]; then
+        cp -r packages/core/dist/* ../extracted_dist/
+      elif [ -d ".astro/dist" ]; then
+        cp -r .astro/dist/* ../extracted_dist/
+      fi
 
-          # 檢查是否有編譯產出
-          if [ ! -d "extracted_dist" ] || [ -z "$(ls -A extracted_dist)" ]; then
-            echo "❌ 錯誤: extracted_dist 目錄為空或不存在，請檢查編譯步驟！"
-            exit 1
-          fi
+      echo "Extracted SPA files:"
+      ls -la ../extracted_dist/
 
-          # 同步靜態 JS/CSS 檔案，並賦予 1 年 Immutable 邊緣快取標頭
-          aws s3 sync extracted_dist/ "${TARGET_PREFIX}/" \
-            --endpoint-url "${ENDPOINT}" \
-            --exclude "index.html" \
-            --cache-control "public, max-age=31536000, immutable"
+  - name: [SPA] Sync Official Admin SPA to Cloudflare R2
+    if: env.DO_SPA == 'true'
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+    run: |
+      VERSION="${{ github.event.inputs.version }}"
+      BUCKET="${{ github.event.inputs.r2_bucket }}"
+      CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
+      ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+      TARGET_PREFIX="s3://${BUCKET}/system/admin-${VERSION}"
 
-          # 獨立同步 index.html，設定 no-cache 以保證版本即時生效
-          if [ -f "extracted_dist/index.html" ]; then
-            aws s3 cp extracted_dist/index.html "${TARGET_PREFIX}/index.html" \
-              --endpoint-url "${ENDPOINT}" \
-              --cache-control "no-cache"
-          fi
+      if [ ! -d "extracted_dist" ] || [ -z "$(ls -A extracted_dist)" ]; then
+        echo "❌ 錯誤: extracted_dist 目錄為空，請檢查編譯步驟！"
+        exit 1
+      fi
 
-      # 7. 輸出成功摘要
-      - name: Deployment Summary
-        run: |
-          echo "=========================================================="
-          echo "🎉 官方正版 EmDash SPA (${{ github.event.inputs.version }}) 建置完成！"
-          echo "📁 R2 儲存路徑: system/admin-${{ github.event.inputs.version }}/"
-          echo "⚡ aiautoblog.cc 中央網關現已可直接串流該正版後台 SPA"
-          echo "=========================================================="
+      echo "Syncing SPA assets to: ${TARGET_PREFIX}/"
+      aws s3 sync extracted_dist/ "${TARGET_PREFIX}/" \
+        --endpoint-url "${ENDPOINT}" \
+        --exclude "index.html" \
+        --cache-control "public, max-age=31536000, immutable"
+
+      if [ -f "extracted_dist/index.html" ]; then
+        aws s3 cp extracted_dist/index.html "${TARGET_PREFIX}/index.html" \
+          --endpoint-url "${ENDPOINT}" \
+          --cache-control "no-cache"
+      fi
+
+  # ========================================================================
+  # 模組二：官方三大佈景主題庫同步 (emdash-cms/templates)
+  # ========================================================================
+  - name: [Themes] Clone & Sync Official Templates
+    if: env.DO_THEMES == 'true'
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+    run: |
+      echo "Cloning official templates (blog, portfolio, marketing)..."
+      git clone --depth 1 https://github.com/emdash-cms/templates.git official-templates
+
+      BUCKET="${{ github.event.inputs.r2_bucket }}"
+      CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
+      ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+      TARGET_THEMES="s3://${BUCKET}/system/themes"
+
+      echo "Syncing official templates to: ${TARGET_THEMES}/"
+      aws s3 sync official-templates/ "${TARGET_THEMES}/" \
+        --endpoint-url "${ENDPOINT}" \
+        --exclude ".git*" \
+        --exclude ".github/*" \
+        --cache-control "public, max-age=86400"
+
+      echo "✅ 官方三大主題庫同步完成！"
+
+  # ========================================================================
+  # 模組三：官方 WP 搬家外掛打包與直傳 (emdash-cms/wp-emdash)
+  # ========================================================================
+  - name: [Plugin] Package & Upload wp-emdash Plugin
+    if: env.DO_PLUGIN == 'true'
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+    run: |
+      echo "Cloning official wp-emdash repository..."
+      git clone --depth 1 https://github.com/emdash-cms/wp-emdash.git wp-emdash-src
+
+      echo "Packaging into standard WordPress plugin ZIP structure..."
+      mkdir -p packaging/wp-emdash
+      cp -r wp-emdash-src/* packaging/wp-emdash/
+      rm -rf packaging/wp-emdash/.git* packaging/wp-emdash/.github
+
+      cd packaging
+      zip -r ../wp-emdash.zip wp-emdash -x "*.git*"
+      cd ..
+
+      echo "Verifying ZIP file size:"
+      ls -lh wp-emdash.zip
+
+      BUCKET="${{ github.event.inputs.r2_bucket }}"
+      CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
+      ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+      TARGET_PLUGIN="s3://${BUCKET}/system/tools/wp-emdash.zip"
+
+      echo "Uploading wp-emdash.zip to: ${TARGET_PLUGIN}"
+      aws s3 cp wp-emdash.zip "${TARGET_PLUGIN}" \
+        --endpoint-url "${ENDPOINT}" \
+        --cache-control "public, max-age=86400" \
+        --content-type "application/zip"
+
+      echo "✅ 官方 wp-emdash 搬家外掛打包並上傳完成！"
+
+  # ========================================================================
+  # 4. 輸出執行成果摘要
+  # ========================================================================
+  - name: Execution Summary
+    run: |
+      BUCKET="${{ github.event.inputs.r2_bucket }}"
+      VERSION="${{ github.event.inputs.version }}"
+      echo "=========================================================="
+      echo "🎉 Cloudflare R2 官方全套生態資產同步完成！"
+      echo "📦 儲存庫: ${BUCKET}"
+      if [ "${{ env.DO_SPA }}" == "true" ]; then
+        echo "  ├─ 1. 正版 Admin SPA: system/admin-${VERSION}/"
+      fi
+      if [ "${{ env.DO_THEMES }}" == "true" ]; then
+        echo "  ├─ 2. 官方三大主題: system/themes/"
+      fi
+      if [ "${{ env.DO_PLUGIN }}" == "true" ]; then
+        echo "  └─ 3. WP 搬家外掛: system/tools/wp-emdash.zip"
+      fi
+      echo "⚡ Fast AI Blog (fastblog.cc) 邊緣節點現已全數接軌官方正版生態！"
+      echo "=========================================================="
