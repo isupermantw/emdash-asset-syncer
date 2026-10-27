@@ -110,19 +110,7 @@ jobs:
               fi
             done
             if [ ! -f "../extracted_dist/index.html" ]; then
-              echo '<!DOCTYPE html>' > ../extracted_dist/index.html
-              echo '<html lang="en">' >> ../extracted_dist/index.html
-              echo '<head>' >> ../extracted_dist/index.html
-              echo '  <meta charset="utf-8" />' >> ../extracted_dist/index.html
-              echo '  <meta name="viewport" content="width=device-width, initial-scale=1.0" />' >> ../extracted_dist/index.html
-              echo '  <title>EmDash Studio</title>' >> ../extracted_dist/index.html
-              echo '  <link rel="stylesheet" href="./assets/index.css" onerror="this.onerror=null;" />' >> ../extracted_dist/index.html
-              echo '</head>' >> ../extracted_dist/index.html
-              echo '<body class="bg-zinc-950 text-zinc-100 antialiased">' >> ../extracted_dist/index.html
-              echo '  <div id="root"></div>' >> ../extracted_dist/index.html
-              echo '  <script type="module" src="./assets/index.js"><' + '/script>' >> ../extracted_dist/index.html
-              echo '</body>' >> ../extracted_dist/index.html
-              echo '</html>' >> ../extracted_dist/index.html
+              printf '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="utf-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n  <title>EmDash Studio</title>\n  <link rel="stylesheet" href="./assets/index.css" />\n</head>\n<body class="bg-zinc-950 text-zinc-100 antialiased">\n  <div id="root"></div>\n  <script type="module" src="./assets/index.js"><' + '/script>\n</body>\n</html>\n' > ../extracted_dist/index.html
             fi
           fi
 
