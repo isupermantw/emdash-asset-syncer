@@ -1,4 +1,4 @@
-name: EmDash All-in-One Asset Syncer to Cloudflare R2
+name: EmDash Gold Image Factory - Worker Bundle Builder
 
 on:
   workflow_dispatch:
@@ -13,323 +13,136 @@ on:
         required: true
         default: "fastblog-media"
         type: string
-      sync_mode:
-        description: "同步模式選擇 (all / spa / themes / plugin)"
+      enable_canary_tag:
+        description: "是否同步發布為 latest 金像 (標記為系統預設開站映像檔)"
         required: true
-        default: "all"
-        type: choice
-        options:
-          - all
-          - spa
-          - themes
-          - plugin
+        default: true
+        type: boolean
+      build_wp_plugin:
+        description: "是否同步打包官方 wp-emdash 搬家外掛"
+        required: true
+        default: true
+        type: boolean
 
 jobs:
-  build-and-sync:
-    name: Build & Sync Official Assets to R2
+  build-and-package-gold-image:
+    name: Build Astro SSR Gold Image & Ship to R2
     runs-on: ubuntu-latest
     steps:
-      - name: Initialize Workflow & Parse Sync Flags
-        run: |
-          MODE="${{ inputs.sync_mode }}"
-          if [ -z "$MODE" ]; then
-            MODE="${{ github.event.inputs.sync_mode }}"
-          fi
-          if [ -z "$MODE" ]; then
-            MODE="all"
-          fi
-          echo "Selected Sync Mode: $MODE"
-          if [ "$MODE" = "spa" ]; then
-            echo "DO_SPA=true" >> "$GITHUB_ENV"
-            echo "DO_THEMES=false" >> "$GITHUB_ENV"
-            echo "DO_PLUGIN=false" >> "$GITHUB_ENV"
-          elif [ "$MODE" = "themes" ]; then
-            echo "DO_SPA=false" >> "$GITHUB_ENV"
-            echo "DO_THEMES=true" >> "$GITHUB_ENV"
-            echo "DO_PLUGIN=false" >> "$GITHUB_ENV"
-          elif [ "$MODE" = "plugin" ]; then
-            echo "DO_SPA=false" >> "$GITHUB_ENV"
-            echo "DO_THEMES=false" >> "$GITHUB_ENV"
-            echo "DO_PLUGIN=true" >> "$GITHUB_ENV"
-          else
-            echo "DO_SPA=true" >> "$GITHUB_ENV"
-            echo "DO_THEMES=true" >> "$GITHUB_ENV"
-            echo "DO_PLUGIN=true" >> "$GITHUB_ENV"
-          fi
-
-      - name: "[SPA] Clone EmDash Core Repository"
-        if: env.DO_SPA == 'true'
+      - name: 1. 解析輸入參數與版本號規範化
+        id: parse-version
         run: |
           RAW_VER="${{ inputs.version }}"
-          CLEAN_VER="${RAW_VER#v}"
-          echo "=========================================================="
-          echo "🔍 準備克隆官方 EmDash 儲存庫，目標版本輸入: ${RAW_VER}"
-          echo "=========================================================="
+          CLEAN_VER=$(echo "${RAW_VER}" | sed -E 's/.*@//; s/^v//')
+          echo "RAW_VER=${RAW_VER}" >> $GITHUB_ENV
+          echo "CLEAN_VER=${CLEAN_VER}" >> $GITHUB_ENV
+          echo "NORMALIZED_TAG=v${CLEAN_VER}" >> $GITHUB_ENV
+          echo "BUCKET=${{ inputs.r2_bucket }}" >> $GITHUB_ENV
+
+      - name: 2. 克隆官方 EmDash Monorepo 儲存庫
+        run: |
           rm -rf official-emdash
           CLONED=0
-          for REF in "${RAW_VER}" "emdash@${CLEAN_VER}" "emdash@${RAW_VER}" "v${CLEAN_VER}" "${CLEAN_VER}" "@emdash-cms/admin@${CLEAN_VER}"; do
-            echo "👉 嘗試透過 Git Ref 克隆: [${REF}]..."
+          for REF in "${RAW_VER}" "emdash@${CLEAN_VER}" "v${CLEAN_VER}" "${CLEAN_VER}" "@emdash-cms/admin@${CLEAN_VER}"; do
             if git clone --depth 1 --branch "${REF}" https://github.com/emdash-cms/emdash.git official-emdash 2>/dev/null; then
-              echo "✅ 成功克隆官方 EmDash (命中 Ref: ${REF})！"
               CLONED=1
               break
             fi
           done
           if [ $CLONED -eq 0 ]; then
-            echo "⚠️ 官方倉庫未找到指定 Ref，啟用安全回退機制：克隆官方 main 穩定分支..."
-            if git clone --depth 1 https://github.com/emdash-cms/emdash.git official-emdash; then
-              echo "✅ 已成功克隆官方最新 main 分支。"
-              CLONED=1
-            else
-              echo "❌ 嚴重錯誤：無法連線至 GitHub 官方儲存庫！"
-              exit 128
-            fi
+            git clone --depth 1 https://github.com/emdash-cms/emdash.git official-emdash
           fi
 
-      - name: "[SPA] Setup Node.js 22 LTS"
-        if: env.DO_SPA == 'true'
+      - name: 3. 設定 Node.js 22 LTS 與 pnpm 9 環境
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: "[SPA] Setup pnpm 9"
-        if: env.DO_SPA == 'true'
+      - name: 3.1 安裝 pnpm
         uses: pnpm/action-setup@v3
         with:
           version: 9
           run_install: false
 
-      - name: "[SPA] Install Core Dependencies"
-        if: env.DO_SPA == 'true'
+      - name: 4. 安裝 Monorepo 全域依賴項
         working-directory: official-emdash
         run: |
+          export NODE_OPTIONS="--max-old-space-size=4096"
           pnpm install --no-frozen-lockfile
 
-      - name: "[SPA] Build Official Admin SPA Packages (v1.1.0 拓撲構建引擎)"
-        if: env.DO_SPA == 'true'
+      - name: 5. Astro SSR Worker 金像核心編譯 (Gold Image Compilation)
         working-directory: official-emdash
         run: |
-          echo "Starting official compilation with Node heap extended..."
           export NODE_OPTIONS="--max-old-space-size=4096"
-          RAW_VER="${{ inputs.version }}"
-          CLEAN_VER="${RAW_VER#v}"
+          pnpm --filter "...@emdash-cms/core" build || true
+          pnpm --filter "...@emdash-cms/admin" build || true
+          pnpm --filter "...@emdash-cms/astro" build || true
 
-          mkdir -p ../extracted_dist
-          mkdir -p ../extracted_dist/assets
+          mkdir -p ../gold_image_dist
+          WORKER_FOUND=0
 
-          echo "🔨 執行 Monorepo 依賴拓撲編譯..."
-          pnpm --filter "...@emdash-cms/admin" build || pnpm run --filter {./packages/**} build || pnpm build || true
-
-          FOUND=0
-          for cand in "packages/admin/dist" "packages/core/dist" "dist" "demos/cloudflare/dist" "demos/cloudflare/dist/client"; do
-            if [ -d "$cand" ] && [ "$(ls -A "$cand" 2>/dev/null)" ]; then
-              echo "✅ 發現本地編譯產物目錄: $cand"
-              cp -r "$cand"/* ../extracted_dist/assets/ 2>/dev/null || true
-              cp -r "$cand"/* ../extracted_dist/ 2>/dev/null || true
-              FOUND=1
-            fi
-          done
-
-          if [ ! -f "../extracted_dist/assets/index.js" ] && [ ! -f "../extracted_dist/assets/index.mjs" ]; then
-            echo "⚠️ 本地編譯未產出 index.js，啟動官方 npm 正版發布包解封機制..."
-            mkdir -p _npm_pack
-            cd _npm_pack
-            npm pack "@emdash-cms/admin@${CLEAN_VER}" || npm pack "@emdash-cms/admin@latest" || true
-            TARBALL=$(ls -1 emdash-cms-admin-*.tgz 2>/dev/null | head -n 1)
-            if [ -n "$TARBALL" ]; then
-              echo "📦 成功取得官方 npm 發布包: ${TARBALL}，正在提取 dist 資產..."
-              tar -xzf "$TARBALL"
-              if [ -d "package/dist" ]; then
-                cp -r package/dist/* ../../extracted_dist/assets/ 2>/dev/null || true
-                cp -r package/dist/* ../../extracted_dist/ 2>/dev/null || true
-                FOUND=1
+          if [ -d "demos/cloudflare" ]; then
+            cd demos/cloudflare
+            pnpm install --no-frozen-lockfile || true
+            pnpm run build || npx astro build
+            cd ../..
+            for cand in "demos/cloudflare/dist/_worker.js" "demos/cloudflare/dist/_worker.js/index.js"; do
+              if [ -f "$cand" ]; then
+                cp "$cand" ../gold_image_dist/emdash-v${CLEAN_VER}.js
+                WORKER_FOUND=1
+                break
               fi
-            fi
-            cd ..
+            done
           fi
+          test $WORKER_FOUND -eq 1 || exit 1
 
-          if [ -f "../extracted_dist/assets/index.mjs" ] && [ ! -f "../extracted_dist/assets/index.js" ]; then
-            echo "複製 index.mjs 為標準 index.js..."
-            cp ../extracted_dist/assets/index.mjs ../extracted_dist/assets/index.js
-          fi
-          if [ -f "../extracted_dist/index.mjs" ] && [ ! -f "../extracted_dist/index.js" ]; then
-            cp ../extracted_dist/index.mjs ../extracted_dist/index.js
-          fi
+      - name: 6. 驗證金像完整度並生成 Manifest 元數據清單
+        run: |
+          cd gold_image_dist
+          TARGET_FILE="emdash-v${CLEAN_VER}.js"
+          test -s "${TARGET_FILE}" || exit 1
+          FILE_BYTES=$(wc -c < "${TARGET_FILE}")
+          SHA256_HASH=$(sha256sum "${TARGET_FILE}" | awk '{print $1}')
+          cat << EOF > manifest.json
+          {
+            "schemaVersion": "2.0",
+            "imageType": "emdash-astro-ssr-worker",
+            "version": "v${CLEAN_VER}",
+            "cleanVersion": "${CLEAN_VER}",
+            "goldImageKey": "system/gold-images/${TARGET_FILE}",
+            "fileSize": ${FILE_BYTES},
+            "sha256": "${SHA256_HASH}",
+            "builtAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "compatibilityDate": "2024-09-23",
+            "compatibilityFlags": ["nodejs_compat"],
+            "themesSupported": ["blog", "portfolio", "marketing"],
+            "status": "ready"
+          }
+          EOF
 
-          echo "合成官方標準 SPA 入口 index.html..."
-          printf '<!DOCTYPE html>\n<html lang="zh-TW" class="dark">\n<head>\n  <meta charset="utf-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n  <base href="/_emdash/admin/" />\n  <title>EmDash Studio - Fast AI Blog</title>\n  <link rel="stylesheet" href="./assets/index.css" onerror="this.onerror=null; console.warn(\"index.css missing\");" />\n  <style>\n    #emdash-fallback-boundary { display: none; padding: 2.5rem 1.5rem; max-width: 32rem; margin: 4rem auto; background: #18181b; border: 1px solid #27272a; border-radius: 1rem; color: #f4f4f5; font-family: ui-sans-serif, system-ui, sans-serif; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5); text-align: center; }\n  </style>\n</head>\n<body class="bg-zinc-950 text-zinc-100 antialiased min-h-screen">\n  <div id="root"></div>\n  <div id="emdash-fallback-boundary">\n    <div style="font-size: 2rem; margin-bottom: 0.75rem;">⚡</div>\n    <h2 style="font-size: 1.125rem; font-weight: 700; margin-bottom: 0.5rem;">EmDash 正版 Studio 載入中...</h2>\n    <p style="font-size: 0.75rem; color: #a1a1aa; line-height: 1.6; margin-bottom: 1.25rem;">若長時間停留在此畫面，請檢查瀏覽器 Console 報告，或重新自管理主控台執行「清除快取」。</p>\n    <a href="./" style="display: inline-block; padding: 0.5rem 1.25rem; background: #4f46e5; color: #ffffff; border-radius: 0.5rem; font-size: 0.75rem; text-decoration: none; font-weight: 600;">重新載入後台</a>\n  </div>\n  <script type="module" src="./assets/index.js" onerror="document.getElementById(\'emdash-fallback-boundary\').style.display=\'block\';"><' + '/script>\n  <script>\n    setTimeout(function() {\n      var root = document.getElementById("root");\n      if (root && (!root.childNodes || root.childNodes.length === 0)) {\n        var b = document.getElementById("emdash-fallback-boundary");\n        if (b) b.style.display = "block";\n      }\n    }, 3500);\n  <' + '/script>\n</body>\n</html>\n' > ../extracted_dist/index.html
-
-          echo "=========================================================="
-          echo "📁 extracted_dist 目錄架構檢驗:"
-          ls -la ../extracted_dist/
-          echo "📁 assets 子目錄清單:"
-          ls -la ../extracted_dist/assets/ 2>/dev/null || true
-          echo "=========================================================="
-          test -s ../extracted_dist/index.html || { echo "❌ 錯誤: index.html 缺失或為空！"; exit 1; }
-
-      - name: "[SPA] Upload Official Admin SPA to Cloudflare R2 (Exit 2 免疫版)"
-        if: env.DO_SPA == 'true'
+      - name: 7. 上傳金像代碼與 Manifest 至 Cloudflare R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          RAW_VER="${{ inputs.version }}"
-          CLEAN_VER="${RAW_VER#v}"
-          BUCKET="${{ inputs.r2_bucket }}"
+          BUCKET="${{ env.BUCKET }}"
           CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
           ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          TARGET_DIR="s3://${BUCKET}/system/gold-images"
+          aws s3 cp gold_image_dist/emdash-v${CLEAN_VER}.js "${TARGET_DIR}/emdash-v${CLEAN_VER}.js" --endpoint-url "${ENDPOINT}" --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp gold_image_dist/manifest.json "${TARGET_DIR}/manifest.json" --endpoint-url "${ENDPOINT}" --cache-control "no-cache"
 
-          if [ ! -d "extracted_dist" ] || [ -z "$(ls -A extracted_dist)" ]; then
-            echo "❌ 錯誤: extracted_dist 目錄為空，請檢查編譯步驟！"
-            exit 1
-          fi
-
-          TARGET_DIRS=("s3://${BUCKET}/system/admin-v${CLEAN_VER}" "s3://${BUCKET}/system/admin-${RAW_VER}" "s3://${BUCKET}/system/admin-emdash@${CLEAN_VER}")
-
-          for TARGET in "${TARGET_DIRS[@]}"; do
-            echo "=========================================================="
-            echo "🚀 開始上傳資產至目標目錄: ${TARGET}/"
-            echo "=========================================================="
-
-            if [ -d "extracted_dist/assets" ] && [ "$(ls -A extracted_dist/assets 2>/dev/null)" ]; then
-              echo "📦 正在上傳 assets/ 靜態分塊資源至: ${TARGET}/assets/ ..."
-              set +e
-              aws s3 cp extracted_dist/assets/ "${TARGET}/assets/" \
-                --recursive \
-                --endpoint-url "${ENDPOINT}" \
-                --cache-control "public, max-age=31536000, immutable"
-              RC_ASSETS=$?
-              set -e
-
-              if [ $RC_ASSETS -ne 0 ] && [ $RC_ASSETS -ne 2 ]; then
-                echo "❌ assets 目錄傳輸失敗 (Exit Code: $RC_ASSETS)"
-                exit $RC_ASSETS
-              elif [ $RC_ASSETS -eq 2 ]; then
-                echo "⚠️ assets 傳輸伴隨略過警告 (Exit Code 2)，繼續執行..."
-              else
-                echo "✅ assets/ 靜態分塊資源 100% 傳輸成功！"
-              fi
-            else
-              echo "⚠️ 警告: extracted_dist/assets 未檢測到實體檔案"
-            fi
-
-            echo "📄 正在上傳 SPA 入口 index.html 至: ${TARGET}/index.html ..."
-            aws s3 cp extracted_dist/index.html "${TARGET}/index.html" \
-              --endpoint-url "${ENDPOINT}" \
-              --cache-control "no-cache" \
-              --content-type "text/html; charset=utf-8"
-
-            set +e
-            aws s3 cp extracted_dist/ "${TARGET}/" \
-              --recursive \
-              --endpoint-url "${ENDPOINT}" \
-              --exclude "index.html" \
-              --exclude "assets/*" \
-              --cache-control "public, max-age=31536000, immutable"
-            RC_ROOT=$?
-            set -e
-
-            if [ $RC_ROOT -ne 0 ] && [ $RC_ROOT -ne 2 ]; then
-              echo "❌ 根層檔案傳輸失敗 (Exit Code: $RC_ROOT)"
-              exit $RC_ROOT
-            fi
-          done
-          echo "✅ 官方 SPA 正版入口與靜態資產雙目錄鏡像發布完成！"
-
-      - name: "[Themes] Clone & Upload Official Templates"
-        if: env.DO_THEMES == 'true'
+      - name: 8. 打包並上傳官方 wp-emdash 搬家外掛
+        if: ${{ inputs.build_wp_plugin }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
         run: |
-          echo "Cloning official templates (blog, portfolio, marketing)..."
-          rm -rf official-templates
-          git clone --depth 1 https://github.com/emdash-cms/templates.git official-templates
-
-          echo "Deep cleaning git metadata, hidden items, and symlinks across all subdirectories..."
-          cd official-templates
-          find . -type d -name ".git*" -prune -exec rm -rf {} + 2>/dev/null || true
-          find . -type f -name ".git*" -delete 2>/dev/null || true
-          find . -type d -name ".github" -prune -exec rm -rf {} + 2>/dev/null || true
-          find . -type l -delete 2>/dev/null || true
-
-          BUCKET="${{ inputs.r2_bucket }}"
-          CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
-          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          TARGET_THEMES="s3://${BUCKET}/system/themes/"
-
-          echo "Uploading clean official templates to: ${TARGET_THEMES}"
-          set +e
-          aws s3 cp . "${TARGET_THEMES}" \
-            --recursive \
-            --endpoint-url "${ENDPOINT}" \
-            --cache-control "public, max-age=86400"
-          RC=$?
-          set -e
-
-          if [ $RC -ne 0 ] && [ $RC -ne 2 ]; then
-            echo "❌ 模板檔案傳輸發生嚴重錯誤 (Exit Code: $RC)"
-            exit $RC
-          elif [ $RC -eq 2 ]; then
-            echo "⚠️ 傳輸完成，伴隨非致命略過警告 (Exit Code 2)，主題檔案已全數上傳至 R2！"
-          else
-            echo "✅ 官方三大主題庫 100% 傳輸成功 (Exit Code 0)！"
-          fi
-          cd ..
-
-      - name: "[Plugin] Package & Upload wp-emdash Plugin"
-        if: env.DO_PLUGIN == 'true'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-        run: |
-          echo "Cloning official wp-emdash repository..."
-          rm -rf wp-emdash-src packaging wp-emdash.zip
           git clone --depth 1 https://github.com/emdash-cms/wp-emdash.git wp-emdash-src
-
-          echo "Packaging into standard WordPress plugin ZIP structure..."
           mkdir -p packaging/wp-emdash
           cp -r wp-emdash-src/* packaging/wp-emdash/
-          rm -rf packaging/wp-emdash/.git* packaging/wp-emdash/.github
-
-          cd packaging
-          zip -r ../wp-emdash.zip wp-emdash -x "*.git*"
-          cd ..
-
-          echo "Verifying ZIP file size:"
-          ls -lh wp-emdash.zip
-
-          BUCKET="${{ inputs.r2_bucket }}"
-          CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
-          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          TARGET_PLUGIN="s3://${BUCKET}/system/tools/wp-emdash.zip"
-
-          echo "Uploading wp-emdash.zip to: ${TARGET_PLUGIN}"
-          aws s3 cp wp-emdash.zip "${TARGET_PLUGIN}" \
-            --endpoint-url "${ENDPOINT}" \
-            --cache-control "public, max-age=86400" \
-            --content-type "application/zip"
-
-          echo "✅ 官方 wp-emdash 搬家外掛打包並上傳完成！"
-
-      - name: Execution Summary
-        run: |
-          BUCKET="${{ inputs.r2_bucket }}"
-          VERSION="${{ inputs.version }}"
-          echo "=========================================================="
-          echo "🎉 Cloudflare R2 官方全套生態資產同步完成！"
-          echo "📦 儲存庫: ${BUCKET}"
-          if [ "${{ env.DO_SPA }}" = "true" ]; then
-            echo "  ├─ 1. 正版 Admin SPA: system/admin-${VERSION}/ (含 assets/ 與 index.html)"
-          fi
-          if [ "${{ env.DO_THEMES }}" = "true" ]; then
-            echo "  ├─ 2. 官方三大主題: system/themes/"
-          fi
-          if [ "${{ env.DO_PLUGIN }}" = "true" ]; then
-            echo "  └─ 3. WP 搬家外掛: system/tools/wp-emdash.zip"
-          fi
-          echo "⚡ Fast AI Blog (fastblog.cc) 邊緣節點現已全數接軌官方正版生態！"
-          echo "=========================================================="
+          cd packaging && zip -r ../wp-emdash.zip wp-emdash -x "*.git*" && cd ..
+          ENDPOINT="https://${{ secrets.CF_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+          aws s3 cp wp-emdash.zip "s3://${{ env.BUCKET }}/system/tools/wp-emdash.zip" --endpoint-url "${ENDPOINT}"
