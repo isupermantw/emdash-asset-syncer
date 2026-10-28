@@ -1,148 +1,199 @@
-name: EmDash Gold Image Factory - Worker Bundle Builder
+name: Fast AI Blog - Deploy Tenant Worker
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "欲編譯的 EmDash 官方版本標籤 (例如: v1.3.1 或 emdash@1.3.1)"
+      subdomain:
+        description: "客戶專屬子網域 (例如: techblog)"
         required: true
-        default: "v1.3.1"
         type: string
-      r2_bucket:
-        description: "目標 Cloudflare R2 儲存庫名稱"
+      d1_database_id:
+        description: "已建立之專屬 Cloudflare D1 UUID"
         required: true
-        default: "fastblog-media"
         type: string
-      enable_canary_tag:
-        description: "是否同步發布為 latest 金像 (標記為系統預設開站映像檔)"
-        required: true
-        default: true
-        type: boolean
-      build_wp_plugin:
-        description: "是否同步打包官方 wp-emdash 搬家外掛"
-        required: true
-        default: true
-        type: boolean
+      site_name:
+        description: "部落格網站名稱"
+        required: false
+        default: "Fast AI Blog"
+        type: string
+      admin_email:
+        description: "站長管理員電子郵件"
+        required: false
+        default: "admin@fastblog.cc"
+        type: string
+      tenant_id:
+        description: "中央系統租戶識別碼 (Tenant ID)"
+        required: false
+        default: ""
+        type: string
+      theme_id:
+        description: "初始佈景主題 (blog / portfolio / marketing)"
+        required: false
+        default: "blog"
+        type: choice
+        options:
+          - blog
+          - portfolio
+          - marketing
+      custom_domain:
+        description: "自訂獨立網域 (選填，例如: blog.brand.tw)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
-  build-and-package-gold-image:
-    name: Build Astro SSR Gold Image & Ship to R2
+  deploy-tenant-edge-worker:
+    name: Build & Deploy Independent Worker via Wrangler
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
-      - name: 1. 解析輸入參數與版本號規範化
-        id: parse-version
-        run: |
-          RAW_VER="${{ inputs.version }}"
-          CLEAN_VER=$(echo "${RAW_VER}" | sed -E 's/.*@//; s/^v//')
-          echo "RAW_VER=${RAW_VER}" >> $GITHUB_ENV
-          echo "CLEAN_VER=${CLEAN_VER}" >> $GITHUB_ENV
-          echo "NORMALIZED_TAG=v${CLEAN_VER}" >> $GITHUB_ENV
-          echo "BUCKET=${{ inputs.r2_bucket }}" >> $GITHUB_ENV
+      - name: 1. 檢出儲存庫代碼 (含 template/ 目錄)
+        uses: actions/checkout@v4
 
-      - name: 2. 克隆官方 EmDash Monorepo 儲存庫
-        run: |
-          rm -rf official-emdash
-          CLONED=0
-          for REF in "${RAW_VER}" "emdash@${CLEAN_VER}" "v${CLEAN_VER}" "${CLEAN_VER}" "@emdash-cms/admin@${CLEAN_VER}"; do
-            if git clone --depth 1 --branch "${REF}" https://github.com/emdash-cms/emdash.git official-emdash 2>/dev/null; then
-              CLONED=1
-              break
-            fi
-          done
-          if [ $CLONED -eq 0 ]; then
-            git clone --depth 1 https://github.com/emdash-cms/emdash.git official-emdash
-          fi
-
-      - name: 3. 設定 Node.js 22 LTS 與 pnpm 9 環境
+      - name: 2. 設定 Node.js 22 LTS 與 pnpm 9 環境
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: 3.1 安裝 pnpm
+      - name: 2.1 安裝 pnpm
         uses: pnpm/action-setup@v3
         with:
           version: 9
           run_install: false
 
-      - name: 4. 安裝 Monorepo 全域依賴項
-        working-directory: official-emdash
+      - name: 3. 驗證並自動確保 template 目錄完整性
         run: |
-          export NODE_OPTIONS="--max-old-space-size=4096"
-          pnpm install --no-frozen-lockfile
-
-      - name: 5. Astro SSR Worker 金像核心編譯 (Gold Image Compilation)
-        working-directory: official-emdash
-        run: |
-          export NODE_OPTIONS="--max-old-space-size=4096"
-          pnpm --filter "...@emdash-cms/core" build || true
-          pnpm --filter "...@emdash-cms/admin" build || true
-          pnpm --filter "...@emdash-cms/astro" build || true
-
-          mkdir -p ../gold_image_dist
-          WORKER_FOUND=0
-
-          if [ -d "demos/cloudflare" ]; then
-            cd demos/cloudflare
-            pnpm install --no-frozen-lockfile || true
-            pnpm run build || npx astro build
-            cd ../..
-            for cand in "demos/cloudflare/dist/_worker.js" "demos/cloudflare/dist/_worker.js/index.js"; do
-              if [ -f "$cand" ]; then
-                cp "$cand" ../gold_image_dist/emdash-v${CLEAN_VER}.js
-                WORKER_FOUND=1
-                break
-              fi
-            done
+          echo "=========================================================="
+          echo "🔍 檢查 template/ 模板工程結構..."
+          if [ ! -d "template" ] || [ ! -f "template/package.json" ]; then
+            echo "⚠️ 未檢測到完整 template/ 目錄，執行腳手架快速生成..."
+            chmod +x ./scripts/init_template.sh 2>/dev/null || true
+            ./scripts/init_template.sh
           fi
-          test $WORKER_FOUND -eq 1 || exit 1
+          echo "✅ 模板目錄就緒。"
+          echo "=========================================================="
 
-      - name: 6. 驗證金像完整度並生成 Manifest 元數據清單
+      - name: 4. 動態合成客戶專屬 wrangler.jsonc 設定檔
+        working-directory: template
         run: |
-          cd gold_image_dist
-          TARGET_FILE="emdash-v${CLEAN_VER}.js"
-          test -s "${TARGET_FILE}" || exit 1
-          FILE_BYTES=$(wc -c < "${TARGET_FILE}")
-          SHA256_HASH=$(sha256sum "${TARGET_FILE}" | awk '{print $1}')
-          cat << EOF > manifest.json
+          SUBDOMAIN="${{ inputs.subdomain }}"
+          D1_ID="${{ inputs.d1_database_id }}"
+          SITE_NAME="${{ inputs.site_name }}"
+          ADMIN_EMAIL="${{ inputs.admin_email }}"
+          WORKER_NAME="blog-${SUBDOMAIN}"
+
+          # 生成專屬隨機 32 位元 Session 安全金鑰
+          EMDASH_SECRET=$(openssl rand -hex 16)
+          echo "EMDASH_SECRET=${EMDASH_SECRET}" >> $GITHUB_ENV
+          echo "WORKER_NAME=${WORKER_NAME}" >> $GITHUB_ENV
+
+          echo "📝 正在為站點 [${WORKER_NAME}] 動態生成 wrangler.jsonc ..."
+
+          cat << EOF > wrangler.jsonc
           {
-            "schemaVersion": "2.0",
-            "imageType": "emdash-astro-ssr-worker",
-            "version": "v${CLEAN_VER}",
-            "cleanVersion": "${CLEAN_VER}",
-            "goldImageKey": "system/gold-images/${TARGET_FILE}",
-            "fileSize": ${FILE_BYTES},
-            "sha256": "${SHA256_HASH}",
-            "builtAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-            "compatibilityDate": "2024-09-23",
-            "compatibilityFlags": ["nodejs_compat"],
-            "themesSupported": ["blog", "portfolio", "marketing"],
-            "status": "ready"
+            "\$schema": "node_modules/wrangler/config-schema.json",
+            "name": "${WORKER_NAME}",
+            "main": "./dist/_worker.js/index.js",
+            "compatibility_date": "2024-09-23",
+            "compatibility_flags": [
+              "nodejs_compat"
+            ],
+            "d1_databases": [
+              {
+                "binding": "DB",
+                "database_name": "emdash_db_${SUBDOMAIN}",
+                "database_id": "${D1_ID}"
+              }
+            ],
+            "r2_buckets": [
+              {
+                "binding": "BUCKET",
+                "bucket_name": "fastblog-media"
+              }
+            ],
+            "vars": {
+              "SITE_URL": "https://${SUBDOMAIN}.fastblog.cc",
+              "TENANT_SUBDOMAIN": "${SUBDOMAIN}",
+              "SITE_NAME": "${SITE_NAME}",
+              "ADMIN_EMAIL": "${ADMIN_EMAIL}"
+            }
           }
           EOF
 
-      - name: 7. 上傳金像代碼與 Manifest 至 Cloudflare R2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-        run: |
-          BUCKET="${{ env.BUCKET }}"
-          CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}"
-          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          TARGET_DIR="s3://${BUCKET}/system/gold-images"
-          aws s3 cp gold_image_dist/emdash-v${CLEAN_VER}.js "${TARGET_DIR}/emdash-v${CLEAN_VER}.js" --endpoint-url "${ENDPOINT}" --cache-control "public, max-age=31536000, immutable"
-          aws s3 cp gold_image_dist/manifest.json "${TARGET_DIR}/manifest.json" --endpoint-url "${ENDPOINT}" --cache-control "no-cache"
+          echo "✅ wrangler.jsonc 設定完成:"
+          cat wrangler.jsonc
 
-      - name: 8. 打包並上傳官方 wp-emdash 搬家外掛
-        if: ${{ inputs.build_wp_plugin }}
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
+      - name: 5. 安裝官方標準 npm 套件依賴項
+        working-directory: template
         run: |
-          git clone --depth 1 https://github.com/emdash-cms/wp-emdash.git wp-emdash-src
-          mkdir -p packaging/wp-emdash
-          cp -r wp-emdash-src/* packaging/wp-emdash/
-          cd packaging && zip -r ../wp-emdash.zip wp-emdash -x "*.git*" && cd ..
-          ENDPOINT="https://${{ secrets.CF_ACCOUNT_ID }}.r2.cloudflarestorage.com"
-          aws s3 cp wp-emdash.zip "s3://${{ env.BUCKET }}/system/tools/wp-emdash.zip" --endpoint-url "${ENDPOINT}"
+          echo "📦 正在安裝 Astro 與 EmDash 官方穩定套件..."
+          export NODE_OPTIONS="--max-old-space-size=4096"
+          pnpm install --no-frozen-lockfile
+
+      - name: 6. 執行標準 Astro SSR 編譯
+        working-directory: template
+        run: |
+          echo "🔨 執行 npx astro build..."
+          export NODE_OPTIONS="--max-old-space-size=4096"
+          pnpm run build
+
+          # 檢查 Cloudflare 轉接器輸出模組是否存在
+          if [ -d "dist/_worker.js" ]; then
+            echo "✅ 成功產出 Astro SSR Worker 模組: dist/_worker.js"
+          else
+            echo "❌ 嚴重錯誤：未找到 dist/_worker.js，編譯失敗！"
+            exit 1
+          fi
+
+      - name: 7. 調用 Cloudflare 官方 Wrangler 部署獨立 Worker
+        working-directory: template
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          echo "🚀 正在將 Worker [${{ env.WORKER_NAME }}] 發布至 Cloudflare 全球節點..."
+          npx wrangler deploy --config wrangler.jsonc
+
+          echo "🔑 注入專屬 EMDASH_SECRET 機密加密密鑰..."
+          echo "${{ env.EMDASH_SECRET }}" | npx wrangler secret put EMDASH_SECRET --config wrangler.jsonc
+
+      - name: 8. 調用 Wrangler 綁定官方子網域
+        working-directory: template
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          SUBDOMAIN="${{ inputs.subdomain }}"
+          HOSTNAME="${SUBDOMAIN}.fastblog.cc"
+
+          echo "🌐 綁定子網域: ${HOSTNAME} ➔ ${{ env.WORKER_NAME }}"
+          npx wrangler domains put "${HOSTNAME}" --worker "${{ env.WORKER_NAME }}" || true
+
+          # 若有自訂獨立網域，同步執行綁定
+          CUSTOM_DOMAIN="${{ inputs.custom_domain }}"
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            echo "🌐 綁定客戶自訂獨立網域: ${CUSTOM_DOMAIN} ➔ ${{ env.WORKER_NAME }}"
+            npx wrangler domains put "${CUSTOM_DOMAIN}" --worker "${{ env.WORKER_NAME }}" || true
+          fi
+
+      - name: 9. 部署完成收尾通知 (回呼中央調度塔)
+        if: always()
+        run: |
+          TENANT_ID="${{ inputs.tenant_id }}"
+          SUBDOMAIN="${{ inputs.subdomain }}"
+          STATUS="${{ job.status }}"
+
+          echo "=========================================================="
+          echo "🎉 部署任務結束，狀態: ${STATUS}"
+          echo "  - 站點網址: https://${SUBDOMAIN}.fastblog.cc/"
+          echo "  - 後台網址: https://${SUBDOMAIN}.fastblog.cc/_emdash/admin/"
+          echo "=========================================================="
+
+          # 若提供 tenant_id 則觸發回呼
+          if [ -n "$TENANT_ID" ]; then
+            echo "📡 回呼中央控制塔通知部署狀態..."
+            curl -s -X POST "https://api.fastblog.cc/api/tenants/${TENANT_ID}/deployed" \
+              -H "Content-Type: application/json" \
+              -d "{\"status\": \"${STATUS}\", \"subdomain\": \"${SUBDOMAIN}\", \"workerName\": \"${{ env.WORKER_NAME }}\"}" || true
+          fi
